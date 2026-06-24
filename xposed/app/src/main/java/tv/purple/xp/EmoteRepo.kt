@@ -1,0 +1,661 @@
+package tv.purple.xp
+
+import android.content.Context
+import android.content.res.Resources
+import android.database.sqlite.SQLiteDatabase
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.os.Build
+import java.nio.ByteBuffer
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+/**
+ * 7TV / BTTV / FFZ emote source (task #9 fetch half — trivial HTTP, obfuscation-immune).
+ *
+ * Holds a name -> full-image-URL map. Hooks read [map]; we populate global emotes on
+ * startup and (later) channel emotes once a channel id is known. Names are matched
+ * case-sensitively against whitespace-delimited words, exactly like native emotes.
+ */
+object EmoteRepo {
+    val map = ConcurrentHashMap<String, String>()
+
+    /** name -> source tag ("7tv" | "bttv" | "ffz") for the entries in [map], so the
+     *  suggestion strip can honour the per-source Settings toggles. */
+    val srcOf = ConcurrentHashMap<String, String>()
+
+    /** name -> ready-to-draw Drawable (bounds set). Populated by prefetch so injected
+     *  ImageSpans render instantly without needing the host TextView for invalidation. */
+    val drawables = ConcurrentHashMap<String, Drawable>()
+
+    /** Twitch native emotes harvested from the app's emotes.db. Kept SEPARATE from [map]
+     *  so we never draw our own ImageSpan over a span Twitch already renders natively.
+     *  Used ONLY to feed the autocomplete suggestion strip. name -> CDN url. */
+    val twitch = ConcurrentHashMap<String, String>()
+
+    /** Drawables for the suggestion strip: union of [drawables] (7TV/BTTV/FFZ) and the
+     *  Twitch harvest. Separate map so injection never picks these up. */
+    val suggestDrawables = ConcurrentHashMap<String, Drawable>()
+
+    /** Raw image bytes for emotes detected as ANIMATED (animated WebP / GIF). Keyed by name.
+     *  A single AnimatedImageDrawable is STATEFUL (one callback, one frame cursor) so it can't be
+     *  shared across chat lines — instead we keep the source bytes and decode a FRESH animated
+     *  drawable per injected span ([makeAnimated]). The [drawables]/[suggestDrawables] maps still
+     *  hold a static first-frame BitmapDrawable for these names as a fallback + size anchor. */
+    val animBytes = ConcurrentHashMap<String, ByteArray>()
+    /** name -> [width,height] px at our row height, for sizing freshly-decoded animated drawables. */
+    private val animBounds = ConcurrentHashMap<String, IntArray>()
+
+    // --- global snapshots (authoritative GLOBAL-only emote set) ---
+    // The public maps above are the LIVE combined view (globals + the CURRENT channel) that the
+    // inject hook (EmoteHooks reads [drawables]) and [suggest] read. When the user switches
+    // channels we rebuild the live maps from these snapshots in loadChannelAsync's publish, so the
+    // previous channel's 7TV/BTTV/FFZ/Twitch emotes can never leak into a channel that doesn't
+    // have them. Globals persist; only channel-scoped entries are dropped.
+    private val gMap = ConcurrentHashMap<String, String>()
+    private val gSrc = ConcurrentHashMap<String, String>()
+    private val gDraw = ConcurrentHashMap<String, Drawable>()
+    private val gTwitch = ConcurrentHashMap<String, String>()
+    private val gSuggestDraw = ConcurrentHashMap<String, Drawable>()
+    /** Numeric id of the channel whose emotes are currently merged into the live maps. */
+    @Volatile private var activeChannel: String? = null
+
+    @Volatile private var globalsLoaded = false
+    @Volatile private var twitchLoaded = false
+
+    // Target emote height in px; set once we know screen density.
+    @Volatile private var emoteHeightPx = 56
+
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .build()
+
+    fun loadGlobalsAsync() {
+        if (globalsLoaded) return
+        globalsLoaded = true
+        emoteHeightPx = (28f * Resources.getSystem().displayMetrics.density).toInt().coerceAtLeast(36)
+        Thread({
+            runCatching { loadSevenTvGlobal() }.onFailure { log("7TV global failed: $it") }
+            runCatching { loadBttvGlobal() }.onFailure { log("BTTV global failed: $it") }
+            runCatching { loadFfzGlobal() }.onFailure { log("FFZ global failed: $it") }
+            // Snapshot the global NAMES now (before any channel can merge in) so a later
+            // channel switch can restore exactly the global-only set.
+            gMap.putAll(map); gSrc.putAll(srcOf)
+            log("emote map ready: ${map.size} global emotes; prefetching images (h=${emoteHeightPx}px)")
+            prefetchDrawables()
+            gDraw.putAll(drawables); gSuggestDraw.putAll(suggestDrawables)
+            log("emote drawables ready: ${drawables.size}/${map.size}")
+        }, "ptv-emote-fetch").start()
+    }
+
+    /**
+     * Harvest the user's Twitch native emotes from the app's Room DB `emotes.db`,
+     * table `frequent_emotes(token TEXT = name, id TEXT = emote id, ...)`. Best-effort,
+     * read-only. These feed ONLY the suggestion strip (never injected — Twitch draws them
+     * natively). Twitch CDN: https://static-cdn.jtvnw.net/emoticons/v2/<id>/default/dark/2.0
+     */
+    fun harvestTwitchAsync(ctx: Context) {
+        if (twitchLoaded) return
+        twitchLoaded = true
+        Thread({
+            runCatching { harvestTwitch(ctx) }.onFailure { log("twitch harvest failed: $it") }
+            log("twitch emotes harvested: ${twitch.size}; prefetching suggestion drawables")
+            prefetchSuggestDrawables()
+            log("suggest drawables ready: ${suggestDrawables.size}")
+        }, "ptv-twitch-harvest").start()
+    }
+
+    private fun harvestTwitch(ctx: Context) {
+        val dbFile = ctx.getDatabasePath("emotes.db") ?: return
+        // List sibling db files so we can find where the FULL owned/available emote set lives
+        // (frequent_emotes only holds recently used emotes — empty for many users).
+        runCatching {
+            dbFile.parentFile?.listFiles()?.forEach {
+                if (it.name.endsWith(".db")) log("db file: ${it.name} (${it.length()} bytes)")
+            }
+        }
+        if (!dbFile.exists()) { log("emotes.db missing"); return }
+        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+        db.use { d ->
+            // One-time schema discovery: every table + columns + row count.
+            runCatching {
+                d.rawQuery("SELECT name FROM sqlite_master WHERE type='table'", null).use { tc ->
+                    while (tc.moveToNext()) {
+                        val t = tc.getString(0) ?: continue
+                        val cols = runCatching {
+                            d.rawQuery("PRAGMA table_info($t)", null).use { pc ->
+                                val sb = StringBuilder()
+                                while (pc.moveToNext()) { sb.append(pc.getString(1)); sb.append(',') }
+                                sb.toString()
+                            }
+                        }.getOrDefault("?")
+                        val cnt = runCatching {
+                            d.rawQuery("SELECT COUNT(*) FROM \"$t\"", null).use { cc ->
+                                if (cc.moveToNext()) cc.getInt(0) else -1
+                            }
+                        }.getOrDefault(-1)
+                        log("emotes.db table '$t' rows=$cnt cols=[$cols]")
+                    }
+                }
+            }.onFailure { log("emotes.db schema dump failed: $it") }
+
+            runCatching {
+                d.rawQuery("SELECT token, id FROM frequent_emotes", null).use { cur ->
+                    while (cur.moveToNext()) {
+                        val name = cur.getString(0) ?: continue
+                        val id = cur.getString(1) ?: continue
+                        if (name.isEmpty() || id.isEmpty()) continue
+                        twitch[name] =
+                            "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/2.0"
+                    }
+                }
+            }.onFailure { log("frequent_emotes query failed: $it") }
+        }
+        log("twitch frequent_emotes: ${twitch.size}")
+    }
+
+    /**
+     * Fetch the user-agnostic GLOBAL Twitch emote set from emotes.adamcy.pl (public, no auth).
+     * Provider 0 == Twitch. These feed ONLY the suggestion strip (never injected — Twitch draws
+     * its own emotes natively). Sends nothing user-specific. name -> CDN url (2x).
+     */
+    @Volatile private var twitchGlobalLoaded = false
+    fun loadTwitchGlobalAsync() {
+        if (twitchGlobalLoaded) return
+        twitchGlobalLoaded = true
+        Thread({
+            val before = twitch.size
+            runCatching {
+                val arr = JSONArray(get("https://emotes.adamcy.pl/v1/global/emotes/all"))
+                addAdamcyTwitch(arr, twitch)
+            }.onFailure { log("adamcy global failed: $it") }
+            log("twitch global emotes: +${twitch.size - before} (total ${twitch.size}); prefetching")
+            prefetchSuggestDrawables()
+            gTwitch.putAll(twitch); gSuggestDraw.putAll(suggestDrawables)
+            log("suggest drawables ready: ${suggestDrawables.size}")
+        }, "ptv-twitch-global").start()
+    }
+
+    // --- personal emote set via Twitch's own GQL (task #9: cross-channel subs/follower/bits) ---
+    // adamcy gives a channel's PUBLIC emote set but cannot know which channels the USER is
+    // subscribed to. To suggest the user's *personal* available emotes (every sub across every
+    // channel, follower emotes, bits, Turbo) we read the app's own OAuth token from its
+    // SharedPreferences (key authToken_v2, written by the host) and issue the same UserEmotes
+    // GQL request the app itself makes on launch. The token is read locally and sent ONLY to
+    // gql.twitch.tv — the exact endpoint the host already uses — and is never logged.
+    //
+    // Multi-user / public-release safe: the token belongs to whatever account is logged in on
+    // THIS device; nothing is hardcoded. Re-read on every fetch so a re-login / refresh is picked
+    // up. No-ops silently when logged out (empty token).
+    private const val GQL_URL = "https://gql.twitch.tv/gql"
+    private const val GQL_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
+    private const val USER_EMOTES_QUERY =
+        "query UserEmotes { currentUser { id emoteSets { __typename ...EmoteSetFragment } } }  " +
+        "fragment EmoteFragment on Emote { id setID token assetType type }  " +
+        "fragment EmoteOwnerFragment on User { id login displayName profileImageURL(width: 28) }  " +
+        "fragment EmoteSetFragment on EmoteSet { id emotes { __typename ...EmoteFragment modifiers { code } } owner { __typename ...EmoteOwnerFragment } }"
+
+    @Volatile private var personalLoaded = false
+
+    /** Fetch the logged-in user's full personal Twitch emote set and merge into the suggestion
+     *  set (suggestion-only — Twitch renders these natively). User-wide, so it lives in the
+     *  global Twitch snapshot and survives channel switches. Gated at suggest() by KEY_SRC_TWITCH. */
+    fun loadPersonalEmotesAsync(ctx: Context) {
+        if (personalLoaded) return
+        personalLoaded = true
+        Thread({
+            runCatching {
+                val token = readAuthToken(ctx)
+                if (token.isBlank()) { log("personal emotes: not logged in (no token) — skipped"); return@Thread }
+                val personal = HashMap<String, String>()
+                fetchUserEmotes(token, personal)
+                if (personal.isEmpty()) { log("personal emotes: none returned"); return@Thread }
+                val before = twitch.size
+                gTwitch.putAll(personal); twitch.putAll(personal)
+                log("personal emotes: +${twitch.size - before} (total twitch ${twitch.size}); prefetching")
+                prefetchSuggestDrawables()
+                gSuggestDraw.putAll(suggestDrawables)
+                log("suggest drawables ready: ${suggestDrawables.size}")
+            }.onFailure { log("personal emotes failed: $it") }
+        }, "ptv-personal-emotes").start()
+    }
+
+    /** Public OAuth-token accessor for sibling modules (e.g. channel-points auto-claim). Returns
+     *  "" when logged out. The token is read locally and must only ever be sent to gql.twitch.tv. */
+    fun authToken(ctx: Context): String = readAuthToken(ctx)
+
+    /** POST a raw GQL operation body to Twitch's gateway with the host Client-ID + the user's
+     *  OAuth token, reusing the shared HTTP client. Returns the response JSON string, or null on
+     *  failure. The token is sent ONLY to gql.twitch.tv (the endpoint the host already uses) and
+     *  is never logged. */
+    fun gqlPost(token: String, jsonBody: String): String? = runCatching {
+        val req = Request.Builder()
+            .url(GQL_URL)
+            .header("Client-ID", GQL_CLIENT_ID)
+            .header("Authorization", "OAuth $token")
+            .post(jsonBody.toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) error("GQL HTTP ${r.code}")
+            r.body?.string()
+        }
+    }.getOrElse { log("gqlPost failed: $it"); null }
+
+    /** Read the host's OAuth token (SharedPreferences key authToken_v2) by scanning the app's own
+     *  shared_prefs dir — no hardcoded file name, obfuscation-immune. Returns "" if absent. */
+    private fun readAuthToken(ctx: Context): String {
+        val dir = File(ctx.applicationInfo.dataDir, "shared_prefs")
+        val files = dir.listFiles { f -> f.name.endsWith(".xml") } ?: return ""
+        for (f in files) {
+            val name = f.name.removeSuffix(".xml")
+            val t = runCatching {
+                ctx.getSharedPreferences(name, Context.MODE_PRIVATE).getString("authToken_v2", null)
+            }.getOrNull()
+            if (!t.isNullOrBlank()) return t
+        }
+        return ""
+    }
+
+    /** POST UserEmotes to Twitch GQL and collect name -> CDN url into [out]. */
+    private fun fetchUserEmotes(token: String, out: MutableMap<String, String>) {
+        val body = JSONObject()
+            .put("operationName", "UserEmotes")
+            .put("variables", JSONObject())
+            .put("query", USER_EMOTES_QUERY)
+            .toString()
+        val req = Request.Builder()
+            .url(GQL_URL)
+            .header("Client-ID", GQL_CLIENT_ID)
+            .header("Authorization", "OAuth $token")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+        val resp = http.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) error("GQL HTTP ${r.code}")
+            r.body?.string() ?: error("empty GQL body")
+        }
+        val sets = JSONObject(resp).optJSONObject("data")
+            ?.optJSONObject("currentUser")?.optJSONArray("emoteSets") ?: return
+        for (i in 0 until sets.length()) {
+            val emotes = sets.optJSONObject(i)?.optJSONArray("emotes") ?: continue
+            for (j in 0 until emotes.length()) {
+                val e = emotes.optJSONObject(j) ?: continue
+                val name = e.optString("token"); val id = e.optString("id")
+                if (name.isEmpty() || id.isEmpty()) continue
+                out[name] = "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/2.0"
+            }
+        }
+    }
+
+    /** Fetch a channel's Twitch (provider 0) emote set from adamcy by LOGIN name into [out]. */
+    private fun loadTwitchChannel(login: String, out: MutableMap<String, String>) {
+        if (login.isBlank()) return
+        runCatching {
+            val arr = JSONArray(get("https://emotes.adamcy.pl/v1/channel/$login/emotes/all"))
+            addAdamcyTwitch(arr, out)
+        }.onFailure { log("adamcy channel '$login' failed: $it") }
+    }
+
+    /** Parse an adamcy emote array, keeping only provider==0 (Twitch), picking the 2x url. */
+    private fun addAdamcyTwitch(arr: JSONArray, out: MutableMap<String, String>) {
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            if (e.optInt("provider", -1) != 0) continue
+            val name = e.optString("code")
+            if (name.isEmpty()) continue
+            val urls = e.optJSONArray("urls") ?: continue
+            var pick = ""; var fallback = ""
+            for (j in 0 until urls.length()) {
+                val u = urls.optJSONObject(j) ?: continue
+                val url = u.optString("url"); if (url.isEmpty()) continue
+                fallback = url
+                if (u.optString("size") == "2x") { pick = url; break }
+            }
+            val chosen = pick.ifEmpty { fallback }
+            if (chosen.isNotEmpty()) out[name] = chosen
+        }
+    }
+
+    /** A single autocomplete suggestion: emote name + optional preview drawable. */
+    data class Sug(val name: String, val drawable: Drawable?)
+
+    /**
+     * Unified emote name suggestions across 7TV/BTTV/FFZ ([map]) and Twitch ([twitch]).
+     * Case-insensitive; startsWith ranks before contains; deduped by name. No colon needed —
+     * the caller passes the raw word the user is typing.
+     */
+    fun suggest(prefix: String, limit: Int = 30): List<Sug> {
+        if (prefix.length < 2) return emptyList()
+        val p = prefix.lowercase()
+        // Per-source toggles from the standalone PurpleTV settings panel.
+        val on7tv = Settings.get(Settings.KEY_SRC_SEVENTV)
+        val onBttv = Settings.get(Settings.KEY_SRC_BTTV)
+        val onFfz = Settings.get(Settings.KEY_SRC_FFZ)
+        val onTwitch = Settings.get(Settings.KEY_SRC_TWITCH)
+        val starts = LinkedHashSet<String>()
+        val contains = LinkedHashSet<String>()
+        for (name in map.keys) {
+            val ok = when (srcOf[name]) {
+                "7tv" -> on7tv; "bttv" -> onBttv; "ffz" -> onFfz; else -> true
+            }
+            if (!ok) continue
+            val l = name.lowercase()
+            if (l.startsWith(p)) starts.add(name) else if (l.contains(p)) contains.add(name)
+        }
+        if (onTwitch) for (name in twitch.keys) {
+            val l = name.lowercase()
+            if (l.startsWith(p)) starts.add(name) else if (l.contains(p)) contains.add(name)
+        }
+        val out = ArrayList<Sug>(limit)
+        for (name in starts) {
+            out.add(Sug(name, suggestDrawables[name]))
+            if (out.size >= limit) return out
+        }
+        for (name in contains) {
+            out.add(Sug(name, suggestDrawables[name]))
+            if (out.size >= limit) return out
+        }
+        return out
+    }
+
+    /** Prefetch suggestion-strip drawables: 7TV/BTTV/FFZ (reuse [drawables]) + Twitch.
+     *  If [guard] is non-null, aborts as soon as [activeChannel] != guard (user switched away). */
+    private fun prefetchSuggestDrawables(guard: String? = null) {
+        for ((name, d) in drawables) suggestDrawables.putIfAbsent(name, d)
+        val res = Resources.getSystem()
+        for ((name, url) in twitch) {
+            if (guard != null && activeChannel != guard) return
+            if (suggestDrawables.containsKey(name)) continue
+            runCatching {
+                val d = buildDrawable(name, getBytes(url), res) ?: error("decode failed")
+                suggestDrawables[name] = d
+            }.onFailure { log("sug img fail '$name': $it") }
+        }
+    }
+
+    // --- channel emotes (keyed by Twitch numeric channel id) ---
+    private val publishLock = Any()
+
+    /**
+     * Load a channel's 7TV/BTTV/FFZ + Twitch emote sets and make them the ONLY channel emotes
+     * merged on top of the globals. Anchor: ChannelChatConnectionKey.channelId.
+     *
+     * CRITICAL (state-leak fix): emotes are built into LOCAL maps off the live ones, then
+     * published ATOMICALLY (live = globals + this channel) only if this is still the active
+     * channel. This prevents a previous channel's emotes from leaking into a channel that
+     * doesn't have them — including the race where the OLD channel's slow image prefetch / Twitch
+     * fetch finishes AFTER the user already switched. The chat-connect ctor fires in a ~13× burst
+     * per channel; we dedup on [activeChannel] so only the first of a burst proceeds. Re-entering
+     * a channel re-fetches it (cheap, upstream-cached).
+     */
+    fun loadChannelAsync(channelId: String, channelName: String?) {
+        if (channelId.isBlank()) return
+        if (channelId == activeChannel) return // same channel (ctor burst / no switch) — ignore
+        activeChannel = channelId
+        Thread({
+            val myId = channelId
+            // Build this channel's set in LOCAL maps — no writes to the live maps yet.
+            val cMap = HashMap<String, String>()
+            val cSrc = HashMap<String, String>()
+            val cTwitch = HashMap<String, String>()
+            runCatching { loadSevenTvChannel(myId, cMap, cSrc) }.onFailure { log("7TV ch failed: $it") }
+            runCatching { loadBttvChannel(myId, cMap, cSrc) }.onFailure { log("BTTV ch failed: $it") }
+            runCatching { loadFfzChannel(myId, cMap, cSrc) }.onFailure { log("FFZ ch failed: $it") }
+            if (!channelName.isNullOrBlank())
+                runCatching { loadTwitchChannel(channelName, cTwitch) }.onFailure { log("twitch ch failed: $it") }
+            if (activeChannel != myId) { log("ch $myId superseded before publish — discarded"); return@Thread }
+            // Publish atomically: live = globals + this channel only. Drops any prior channel.
+            synchronized(publishLock) {
+                if (activeChannel != myId) { log("ch $myId superseded at publish — discarded"); return@Thread }
+                map.clear(); map.putAll(gMap); map.putAll(cMap)
+                srcOf.clear(); srcOf.putAll(gSrc); srcOf.putAll(cSrc)
+                twitch.clear(); twitch.putAll(gTwitch); twitch.putAll(cTwitch)
+                drawables.clear(); drawables.putAll(gDraw)
+                suggestDrawables.clear(); suggestDrawables.putAll(gSuggestDraw)
+            }
+            log("channel $myId ($channelName) published: +${cMap.size} inject, +${cTwitch.size} twitch (map=${map.size}); prefetching")
+            // Download channel images into the live maps; aborts mid-loop if the user switches.
+            prefetchDrawables(myId)
+            if (activeChannel != myId) return@Thread
+            prefetchSuggestDrawables(myId)
+            log("channel $myId drawables ready: ${drawables.size}/${map.size}")
+        }, "ptv-ch-fetch-$channelId").start()
+    }
+
+    // 7TV channel: https://7tv.io/v3/users/twitch/<id> -> { emote_set:{ emotes:[ {name,id} ] } }
+    private fun loadSevenTvChannel(id: String, out: MutableMap<String, String>, src: MutableMap<String, String>) {
+        val root = JSONObject(get("https://7tv.io/v3/users/twitch/$id"))
+        val arr = root.optJSONObject("emote_set")?.optJSONArray("emotes") ?: return
+        var n = 0
+        for (i in 0 until arr.length()) {
+            val e = arr.getJSONObject(i)
+            val name = e.optString("name"); val eid = e.optString("id")
+            if (name.isEmpty() || eid.isEmpty()) continue
+            out[name] = "https://cdn.7tv.app/emote/$eid/2x.webp"; src[name] = "7tv"; n++
+        }
+        log("7TV channel: $n")
+    }
+
+    // BTTV channel: https://api.betterttv.net/3/cached/users/twitch/<id> -> { channelEmotes:[], sharedEmotes:[] }
+    private fun loadBttvChannel(id: String, out: MutableMap<String, String>, src: MutableMap<String, String>) {
+        val root = JSONObject(get("https://api.betterttv.net/3/cached/users/twitch/$id"))
+        var n = 0
+        for (key in arrayOf("channelEmotes", "sharedEmotes")) {
+            val arr = root.optJSONArray(key) ?: continue
+            for (i in 0 until arr.length()) {
+                val e = arr.getJSONObject(i)
+                val name = e.optString("code"); val eid = e.optString("id")
+                if (name.isEmpty() || eid.isEmpty()) continue
+                out[name] = "https://cdn.betterttv.net/emote/$eid/2x"; src[name] = "bttv"; n++
+            }
+        }
+        log("BTTV channel: $n")
+    }
+
+    // FFZ room: https://api.frankerfacez.com/v1/room/id/<id> -> { sets:{ "<id>":{ emoticons:[...] } } }
+    private fun loadFfzChannel(id: String, out: MutableMap<String, String>, src: MutableMap<String, String>) {
+        val root = JSONObject(get("https://api.frankerfacez.com/v1/room/id/$id"))
+        val sets = root.optJSONObject("sets") ?: return
+        var n = 0
+        for (key in sets.keys()) {
+            val emotes = sets.getJSONObject(key).optJSONArray("emoticons") ?: continue
+            for (i in 0 until emotes.length()) {
+                val e = emotes.getJSONObject(i)
+                val name = e.optString("name"); val urls = e.optJSONObject("urls")
+                if (name.isEmpty() || urls == null) continue
+                val pick = urls.optString("2").ifEmpty { urls.optString("1") }
+                if (pick.isEmpty()) continue
+                out[name] = if (pick.startsWith("//")) "https:$pick" else pick
+                src[name] = "ffz"; n++
+            }
+        }
+        log("FFZ channel: $n")
+    }
+
+    /**
+     * Decode emote [bytes] into a ready-to-draw Drawable scaled to our row height. Animated
+     * sources (animated WebP / GIF) are detected here: we cache their bytes in [animBytes] +
+     * size in [animBounds] (so [makeAnimated] can mint fresh independently-animating copies) and
+     * return a STATIC first-frame BitmapDrawable as the stored fallback. Static sources return a
+     * plain BitmapDrawable. Uses ImageDecoder on API 28+ (animation requires it); below that, or
+     * on any failure, falls back to a static BitmapFactory decode.
+     */
+    private fun buildDrawable(name: String, bytes: ByteArray, res: Resources): Drawable? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val d = runCatching {
+                val src = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+                var tw = emoteHeightPx
+                val decoded = ImageDecoder.decodeDrawable(src) { dec, info, _ ->
+                    val iw = info.size.width; val ih = info.size.height
+                    tw = if (ih > 0) (emoteHeightPx * iw / ih) else emoteHeightPx
+                    dec.setTargetSize(tw.coerceAtLeast(1), emoteHeightPx)
+                }
+                if (decoded is AnimatedImageDrawable) {
+                    animBytes[name] = bytes
+                    animBounds[name] = intArrayOf(tw.coerceAtLeast(1), emoteHeightPx)
+                    // Static first frame for the cached map (fallback + injection default).
+                    val first = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes)))
+                    BitmapDrawable(res, first).apply { setBounds(0, 0, tw.coerceAtLeast(1), emoteHeightPx) }
+                } else {
+                    decoded.apply { setBounds(0, 0, tw.coerceAtLeast(1), emoteHeightPx) }
+                }
+            }.getOrNull()
+            if (d != null) return d
+        }
+        return runCatching {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("decode failed")
+            val tw = if (bmp.height > 0) (emoteHeightPx * bmp.width / bmp.height) else emoteHeightPx
+            BitmapDrawable(res, bmp).apply { setBounds(0, 0, tw.coerceAtLeast(1), emoteHeightPx) }
+        }.getOrNull()
+    }
+
+    /**
+     * Mint a FRESH, independently-animating drawable for [name] if it is an animated emote,
+     * else null (caller falls back to the static cached drawable). Each call decodes a new
+     * AnimatedImageDrawable from the cached source bytes so every chat line / preview gets its
+     * own frame cursor + callback. Infinite-looping. Bounds set to the emote's row size.
+     */
+    fun makeAnimated(name: String): Drawable? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        val bytes = animBytes[name] ?: return null
+        val b = animBounds[name]
+        return runCatching {
+            val src = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+            val d = ImageDecoder.decodeDrawable(src) { dec, _, _ ->
+                if (b != null) dec.setTargetSize(b[0], b[1])
+            }
+            if (d is AnimatedImageDrawable) {
+                if (b != null) d.setBounds(0, 0, b[0], b[1])
+                d.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                d
+            } else null
+        }.getOrNull()
+    }
+
+    /**
+     * Build a LARGE preview drawable for [name] at NATIVE resolution (for the tap-to-zoom popup).
+     * Animated emotes return a fresh infinite-looping AnimatedImageDrawable (caller starts it);
+     * static emotes a plain BitmapDrawable. Source bytes come from the animated cache if present,
+     * else the static cache's already-downloaded image isn't kept, so we re-download from the URL
+     * ([map] for 7TV/BTTV/FFZ, else [twitch]). Runs on a worker thread (network) — never the UI
+     * thread. Bounds are set to the drawable's intrinsic size. Returns null on failure.
+     */
+    fun loadPreviewDrawable(name: String): Drawable? {
+        val cached = animBytes[name]
+        val bytes = cached ?: runCatching {
+            val url = map[name] ?: twitch[name] ?: return null
+            getBytes(url)
+        }.getOrNull() ?: return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val d = runCatching {
+                val src = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+                ImageDecoder.decodeDrawable(src)
+            }.getOrNull()
+            if (d != null) {
+                if (d is AnimatedImageDrawable) d.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                d.setBounds(0, 0, d.intrinsicWidth.coerceAtLeast(1), d.intrinsicHeight.coerceAtLeast(1))
+                return d
+            }
+        }
+        return runCatching {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("decode failed")
+            BitmapDrawable(Resources.getSystem(), bmp)
+                .apply { setBounds(0, 0, bmp.width.coerceAtLeast(1), bmp.height.coerceAtLeast(1)) }
+        }.getOrNull()
+    }
+
+    /** Download + decode every emote image into a bounds-set Drawable. Best-effort.
+     *  If [guard] is non-null, aborts as soon as [activeChannel] != guard (user switched away). */
+    private fun prefetchDrawables(guard: String? = null) {
+        val res = Resources.getSystem()
+        for ((name, url) in map) {
+            if (guard != null && activeChannel != guard) return
+            if (drawables.containsKey(name)) continue
+            runCatching {
+                val d = buildDrawable(name, getBytes(url), res) ?: error("decode failed")
+                drawables[name] = d
+                suggestDrawables[name] = d
+            }.onFailure { log("img fail '$name': $it") }
+        }
+    }
+
+    private fun getBytes(url: String): ByteArray {
+        http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+            if (!r.isSuccessful) error("HTTP ${r.code} for $url")
+            return r.body?.bytes() ?: error("empty body for $url")
+        }
+    }
+
+    private fun get(url: String): String {
+        http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+            if (!r.isSuccessful) error("HTTP ${r.code} for $url")
+            return r.body?.string() ?: error("empty body for $url")
+        }
+    }
+
+    // 7TV: https://7tv.io/v3/emote-sets/global -> { emotes:[ {name,id} ] }
+    private fun loadSevenTvGlobal() {
+        val root = JSONObject(get("https://7tv.io/v3/emote-sets/global"))
+        val arr = root.optJSONArray("emotes") ?: return
+        var n = 0
+        for (i in 0 until arr.length()) {
+            val e = arr.getJSONObject(i)
+            val name = e.optString("name")
+            val id = e.optString("id")
+            if (name.isEmpty() || id.isEmpty()) continue
+            map.putIfAbsent(name, "https://cdn.7tv.app/emote/$id/2x.webp")
+            srcOf.putIfAbsent(name, "7tv")
+            n++
+        }
+        log("7TV global: $n")
+    }
+
+    // BTTV: https://api.betterttv.net/3/cached/emotes/global -> [ {id,code} ]
+    private fun loadBttvGlobal() {
+        val arr = JSONArray(get("https://api.betterttv.net/3/cached/emotes/global"))
+        var n = 0
+        for (i in 0 until arr.length()) {
+            val e = arr.getJSONObject(i)
+            val name = e.optString("code")
+            val id = e.optString("id")
+            if (name.isEmpty() || id.isEmpty()) continue
+            map.putIfAbsent(name, "https://cdn.betterttv.net/emote/$id/2x")
+            srcOf.putIfAbsent(name, "bttv")
+            n++
+        }
+        log("BTTV global: $n")
+    }
+
+    // FFZ: https://api.frankerfacez.com/v1/set/global -> { sets:{ "<id>":{ emoticons:[ {name,urls:{"1","2","4"}} ] } } }
+    private fun loadFfzGlobal() {
+        val root = JSONObject(get("https://api.frankerfacez.com/v1/set/global"))
+        val sets = root.optJSONObject("sets") ?: return
+        var n = 0
+        for (key in sets.keys()) {
+            val emotes = sets.getJSONObject(key).optJSONArray("emoticons") ?: continue
+            for (i in 0 until emotes.length()) {
+                val e = emotes.getJSONObject(i)
+                val name = e.optString("name")
+                val urls = e.optJSONObject("urls")
+                if (name.isEmpty() || urls == null) continue
+                val pick = urls.optString("2").ifEmpty { urls.optString("1") }
+                if (pick.isEmpty()) continue
+                val full = if (pick.startsWith("//")) "https:$pick" else pick
+                map.putIfAbsent(name, full)
+                srcOf.putIfAbsent(name, "ffz")
+                n++
+            }
+        }
+        log("FFZ global: $n")
+    }
+}
