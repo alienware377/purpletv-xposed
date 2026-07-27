@@ -34,6 +34,27 @@ object EmoteRepo {
      *  suggestion strip can honour the per-source Settings toggles. */
     val srcOf = ConcurrentHashMap<String, String>()
 
+    /** Names contributed by the 7TV GLOBAL set. Tracked separately so "7TV global emotes" can be
+     *  switched off while channel 7TV emotes stay on. */
+    val stvGlobal: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    const val KEY_STV_GLOBAL = "stv_global_emotes"
+
+    /**
+     * Whether [name] should render at all, given the per-source toggles.
+     *
+     * Used by BOTH the autocomplete strip and the chat injector, so switching a source off
+     * removes those emotes from chat too — previously the toggles only filtered suggestions
+     * while chat kept rendering them.
+     */
+    fun enabled(name: String): Boolean = when (srcOf[name]) {
+        "7tv" -> Settings.get(Settings.KEY_SRC_SEVENTV) &&
+            (name !in stvGlobal || Settings.get(KEY_STV_GLOBAL, true))
+        "bttv" -> Settings.get(Settings.KEY_SRC_BTTV)
+        "ffz" -> Settings.get(Settings.KEY_SRC_FFZ)
+        else -> true
+    }
+
     /** name -> ready-to-draw Drawable (bounds set). Populated by prefetch so injected
      *  ImageSpans render instantly without needing the host TextView for invalidation. */
     val drawables = ConcurrentHashMap<String, Drawable>()
@@ -80,6 +101,25 @@ object EmoteRepo {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * Drop every cached emote and re-run the loaders. Called when the quality dropdown changes,
+     * since the size is baked into each CDN url at fetch time. The current channel's set is
+     * restored afterwards by [loadChannelAsync], which the caller re-triggers.
+     */
+    fun refetch() {
+        Thread({
+            runCatching {
+                map.clear(); srcOf.clear(); stvGlobal.clear()
+                gMap.clear(); gSrc.clear()
+                drawables.clear(); gDraw.clear()
+                animBytes.clear(); suggestDrawables.clear()
+                globalsLoaded = false
+                loadGlobalsAsync()
+                log("emote cache cleared; refetching at quality=${Settings.getInt(EmoteQuality.KEY, EmoteQuality.DEFAULT)}")
+            }.onFailure { log("refetch failed: $it") }
+        }, "ptv-emote-refetch").apply { isDaemon = true }.start()
+    }
 
     fun loadGlobalsAsync() {
         if (globalsLoaded) return
@@ -157,7 +197,7 @@ object EmoteRepo {
                         val id = cur.getString(1) ?: continue
                         if (name.isEmpty() || id.isEmpty()) continue
                         twitch[name] =
-                            "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/2.0"
+                            "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/${EmoteQuality.twitch}"
                     }
                 }
             }.onFailure { log("frequent_emotes query failed: $it") }
@@ -292,7 +332,7 @@ object EmoteRepo {
                 val e = emotes.optJSONObject(j) ?: continue
                 val name = e.optString("token"); val id = e.optString("id")
                 if (name.isEmpty() || id.isEmpty()) continue
-                out[name] = "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/2.0"
+                out[name] = "https://static-cdn.jtvnw.net/emoticons/v2/$id/default/dark/${EmoteQuality.twitch}"
             }
         }
     }
@@ -319,7 +359,7 @@ object EmoteRepo {
                 val u = urls.optJSONObject(j) ?: continue
                 val url = u.optString("url"); if (url.isEmpty()) continue
                 fallback = url
-                if (u.optString("size") == "2x") { pick = url; break }
+                if (u.optString("size") == EmoteQuality.adamcy) { pick = url; break }
             }
             val chosen = pick.ifEmpty { fallback }
             if (chosen.isNotEmpty()) out[name] = chosen
@@ -338,17 +378,11 @@ object EmoteRepo {
         if (prefix.length < 2) return emptyList()
         val p = prefix.lowercase()
         // Per-source toggles from the standalone PurpleTV settings panel.
-        val on7tv = Settings.get(Settings.KEY_SRC_SEVENTV)
-        val onBttv = Settings.get(Settings.KEY_SRC_BTTV)
-        val onFfz = Settings.get(Settings.KEY_SRC_FFZ)
         val onTwitch = Settings.get(Settings.KEY_SRC_TWITCH)
         val starts = LinkedHashSet<String>()
         val contains = LinkedHashSet<String>()
         for (name in map.keys) {
-            val ok = when (srcOf[name]) {
-                "7tv" -> on7tv; "bttv" -> onBttv; "ffz" -> onFfz; else -> true
-            }
-            if (!ok) continue
+            if (!enabled(name)) continue
             val l = name.lowercase()
             if (l.startsWith(p)) starts.add(name) else if (l.contains(p)) contains.add(name)
         }
@@ -441,7 +475,7 @@ object EmoteRepo {
             val e = arr.getJSONObject(i)
             val name = e.optString("name"); val eid = e.optString("id")
             if (name.isEmpty() || eid.isEmpty()) continue
-            out[name] = "https://cdn.7tv.app/emote/$eid/2x.webp"; src[name] = "7tv"; n++
+            out[name] = "https://cdn.7tv.app/emote/$eid/${EmoteQuality.sevenTv}.webp"; src[name] = "7tv"; n++
         }
         log("7TV channel: $n")
     }
@@ -456,7 +490,7 @@ object EmoteRepo {
                 val e = arr.getJSONObject(i)
                 val name = e.optString("code"); val eid = e.optString("id")
                 if (name.isEmpty() || eid.isEmpty()) continue
-                out[name] = "https://cdn.betterttv.net/emote/$eid/2x"; src[name] = "bttv"; n++
+                out[name] = "https://cdn.betterttv.net/emote/$eid/${EmoteQuality.bttv}"; src[name] = "bttv"; n++
             }
         }
         log("BTTV channel: $n")
@@ -473,7 +507,7 @@ object EmoteRepo {
                 val e = emotes.getJSONObject(i)
                 val name = e.optString("name"); val urls = e.optJSONObject("urls")
                 if (name.isEmpty() || urls == null) continue
-                val pick = urls.optString("2").ifEmpty { urls.optString("1") }
+                val pick = urls.optString(EmoteQuality.ffz).ifEmpty { urls.optString("2") }.ifEmpty { urls.optString("1") }
                 if (pick.isEmpty()) continue
                 out[name] = if (pick.startsWith("//")) "https:$pick" else pick
                 src[name] = "ffz"; n++
@@ -613,8 +647,9 @@ object EmoteRepo {
             val name = e.optString("name")
             val id = e.optString("id")
             if (name.isEmpty() || id.isEmpty()) continue
-            map.putIfAbsent(name, "https://cdn.7tv.app/emote/$id/2x.webp")
+            map.putIfAbsent(name, "https://cdn.7tv.app/emote/$id/${EmoteQuality.sevenTv}.webp")
             srcOf.putIfAbsent(name, "7tv")
+            stvGlobal.add(name)
             n++
         }
         log("7TV global: $n")
@@ -629,7 +664,7 @@ object EmoteRepo {
             val name = e.optString("code")
             val id = e.optString("id")
             if (name.isEmpty() || id.isEmpty()) continue
-            map.putIfAbsent(name, "https://cdn.betterttv.net/emote/$id/2x")
+            map.putIfAbsent(name, "https://cdn.betterttv.net/emote/$id/${EmoteQuality.bttv}")
             srcOf.putIfAbsent(name, "bttv")
             n++
         }
@@ -648,7 +683,7 @@ object EmoteRepo {
                 val name = e.optString("name")
                 val urls = e.optJSONObject("urls")
                 if (name.isEmpty() || urls == null) continue
-                val pick = urls.optString("2").ifEmpty { urls.optString("1") }
+                val pick = urls.optString(EmoteQuality.ffz).ifEmpty { urls.optString("2") }.ifEmpty { urls.optString("1") }
                 if (pick.isEmpty()) continue
                 val full = if (pick.startsWith("//")) "https:$pick" else pick
                 map.putIfAbsent(name, full)

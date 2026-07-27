@@ -104,7 +104,7 @@ object PurpleMenu {
         Toggle("7TV emotes", "Enable support for 7TV emotes in the chat",
             Settings.KEY_SRC_SEVENTV, def = true, done = true),
         Toggle("7TV global emotes", "Enable support for 7TV global emotes in the chat",
-            "stv_global_emotes", def = true),
+            EmoteRepo.KEY_STV_GLOBAL, def = true, done = true),
         Toggle("Homies emotes", "Enable support for Homies emotes in the chat", "homies_emotes"),
         Toggle("Twitch emotes in suggestions",
             "Include your own Twitch and subscriber emotes in the autocomplete strip",
@@ -114,7 +114,8 @@ object PurpleMenu {
             "picker_favorites", def = true, done = true),
         Drop("Emotes quality",
             "Adjust the quality of displayed emotes in the chat, which may impact performance",
-            "emote_quality", listOf("Low", "Medium", "Large"), def = 1)
+            EmoteQuality.KEY, listOf("Low", "Medium", "Large"),
+            def = EmoteQuality.DEFAULT, done = true)
     )
 
     private val BADGES = listOf(
@@ -142,7 +143,7 @@ object PurpleMenu {
         Slide("Landscape chat opacity", "Adjust the opacity of the chat window in landscape mode",
             Settings.KEY_CHAT_OPACITY, min = 0, max = 100, def = 100, done = true),
         Toggle("Alternating Background", "Display chat lines with alternating background colors",
-            "alternate_background"),
+            ChatAppearance.KEY_ALT_BG, done = true),
         Toggle("Vibrate when mentioned",
             "Enable this option to receive a vibration notification when you are mentioned in the chat",
             "vibrate_on_mention"),
@@ -191,7 +192,8 @@ object PurpleMenu {
         Drop("Pinned messages", "Choose the behavior of pinned messages in the chat",
             "pinned_message", listOf("Default", "Disabled", "30 sec.")),
         Slide("Chat font size", "Adjust the font size for chat messages",
-            "chat_font_size_v2", min = 8, max = 24, def = 13),
+            ChatAppearance.KEY_FONT_SIZE, min = 8, max = 24,
+            def = ChatAppearance.FONT_SIZE_DEFAULT, done = true),
         Slide("Vibration duration",
             "Set the duration of the vibration in milliseconds for chat notifications",
             "vibration_duration", min = 10, max = 1000, def = 100, step = 10),
@@ -376,8 +378,9 @@ object PurpleMenu {
                 isEnabled = item.done
                 setOnCheckedChangeListener { _, v ->
                     Settings.set(item.key, v)
-                    // Hide-style toggles take effect on the live chat behind the menu.
+                    // Both take effect on the live chat behind the menu.
                     ViewHider.reapply()
+                    ChatAppearance.reapply()
                 }
             })
             is Sub -> titleRow.addView(TextView(ctx).apply {
@@ -428,6 +431,7 @@ object PurpleMenu {
                             if (item.key == Settings.KEY_CHAT_OPACITY ||
                                 item.key == ChatTransparency.KEY_CHAT_WIDTH
                             ) ChatTransparency.reapply()
+                            if (item.key == ChatAppearance.KEY_FONT_SIZE) ChatAppearance.reapply()
                         }
                     }
                     override fun onStartTrackingTouch(sb: SeekBar) {}
@@ -460,6 +464,11 @@ object PurpleMenu {
             .setSingleChoiceItems(item.options.toTypedArray(), cur) { d, which ->
                 Settings.setInt(item.key, which)
                 valueView?.text = item.options[which]
+                // Quality is baked into each CDN url at fetch time, so re-download at the new size.
+                if (item.key == EmoteQuality.KEY && which != cur) {
+                    EmoteRepo.refetch()
+                    toast(ctx, "Re-downloading emotes at ${item.options[which].lowercase()} quality")
+                }
                 d.dismiss()
             }
             .show()

@@ -145,7 +145,8 @@ object EmoteHooks {
         // quick reject: any whole word a known (prefetched) emote?
         val hits = ArrayList<Triple<Int, Int, String>>(2)
         for (m in word.findAll(body)) {
-            if (EmoteRepo.drawables.containsKey(m.value)) hits.add(Triple(m.range.first, m.range.last + 1, m.value))
+            if (EmoteRepo.drawables.containsKey(m.value) && EmoteRepo.enabled(m.value))
+                hits.add(Triple(m.range.first, m.range.last + 1, m.value))
         }
         if (hits.isEmpty()) return
 
