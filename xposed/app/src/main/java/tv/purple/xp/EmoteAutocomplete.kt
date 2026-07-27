@@ -143,8 +143,10 @@ object EmoteAutocomplete {
         return runCatching {
             val ed = input.text ?: return false
             val pos = input.selectionStart.coerceIn(0, ed.length)
-            ed.insert(pos, "$name ")
-            input.setSelection((pos + name.length + 1).coerceAtMost(input.text.length))
+            val needPre = pos > 0 && ed[pos - 1] != ' '
+            val insert = if (needPre) " $name " else "$name "
+            ed.insert(pos, insert)
+            input.setSelection((pos + insert.length).coerceAtMost(input.text.length))
             true
         }.getOrDefault(false)
     }
