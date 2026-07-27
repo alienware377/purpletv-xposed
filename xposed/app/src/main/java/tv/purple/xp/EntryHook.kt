@@ -63,5 +63,6 @@ class EntryHook : de.robv.android.xposed.IXposedHookLoadPackage {
         runCatching { PickerFavorites.install(lpparam) }.onFailure { log("picker favorites failed: $it") }
         runCatching { ChatTransparency.install(lpparam) }.onFailure { log("chat transparency failed: $it") }
         runCatching { ChannelPoints.install(ctx) }.onFailure { log("channel points failed: $it") }
+        runCatching { SettingsEntry.install(lpparam) }.onFailure { log("settings entry failed: $it") }
     }
 }
