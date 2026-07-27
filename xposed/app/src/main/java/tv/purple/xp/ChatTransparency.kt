@@ -127,35 +127,20 @@ object ChatTransparency {
             if (bg.alpha != bgAlpha) bg.alpha = bgAlpha
         }
 
-        applyWidth(act, outermost ?: return, landscape)
     }
-
-    /** Landscape chat panel width, as a percentage of screen width. */
-    const val KEY_CHAT_WIDTH = "landscape_chat_size_v3"
-    const val CHAT_WIDTH_DEFAULT = 30
-
-    /** Original layout width of each panel we've resized, so portrait restores exactly. */
-    private val ORIG_WIDTH = java.util.WeakHashMap<View, Int>()
 
     /**
-     * Applied to the same outermost container we dim, so width and opacity live on one view and
-     * can't fight each other. Portrait restores the width Twitch originally laid out.
+     * Landscape chat panel width.
+     *
+     * NOT IMPLEMENTED — deliberately left unwired. Forcing `layoutParams.width` on chat_wrapper
+     * widens the panel without moving its left edge, because the surrounding layout pins that edge
+     * rather than distributing free space. Anything above the width Twitch itself chose then hangs
+     * off the right of the screen and chat text is clipped mid-word. Doing this properly means
+     * resizing the player container in the same pass so the two stay complementary, which needs
+     * the real parent layout identified first.
      */
-    private fun applyWidth(act: Activity, panel: View, landscape: Boolean) {
-        val lp = panel.layoutParams ?: return
-        if (!ORIG_WIDTH.containsKey(panel)) ORIG_WIDTH[panel] = lp.width
-
-        val target = if (landscape) {
-            val pct = Settings.getInt(KEY_CHAT_WIDTH, CHAT_WIDTH_DEFAULT).coerceIn(10, 50)
-            act.resources.displayMetrics.widthPixels * pct / 100
-        } else {
-            ORIG_WIDTH[panel] ?: return
-        }
-        if (lp.width != target) {
-            lp.width = target
-            panel.layoutParams = lp
-        }
-    }
+    const val KEY_CHAT_WIDTH = "landscape_chat_size_v3"
+    const val CHAT_WIDTH_DEFAULT = 30
 
     private inline fun walk(root: View, action: (View) -> Unit) {
         val stack = ArrayDeque<View>()

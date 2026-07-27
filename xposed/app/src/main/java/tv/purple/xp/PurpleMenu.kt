@@ -199,7 +199,7 @@ object PurpleMenu {
             "vibration_duration", min = 10, max = 1000, def = 100, step = 10),
         Slide("Landscape chat width", "Configure the width of the chat view in landscape mode",
             ChatTransparency.KEY_CHAT_WIDTH, min = 10, max = 50,
-            def = ChatTransparency.CHAT_WIDTH_DEFAULT, done = true),
+            def = ChatTransparency.CHAT_WIDTH_DEFAULT),
         Slide("Landscape split chat width",
             "Configure the width of the split chat view in landscape mode",
             "landscape_split_chat_size_v3", min = 10, max = 70, def = 50),
