@@ -130,14 +130,29 @@ object ViewHider {
             shouldHide.addAll(rule.entries)
         }
 
-        var hidTracker = false
+        var hidAny = false
         for ((entry, views) in found) {
-            val target = if (entry in shouldHide) View.GONE else View.VISIBLE
-            if (target == View.GONE) hidTracker = true
-            for (v in views) if (v.visibility != target) v.visibility = target
+            val hide = entry in shouldHide
+            for (v in views) {
+                if (hide) {
+                    if (v.visibility != View.GONE) v.visibility = View.GONE
+                    HIDDEN[v] = true
+                    hidAny = true
+                } else if (HIDDEN.remove(v) != null) {
+                    // Restore ONLY views we hid ourselves. Twitch keeps plenty of these GONE on
+                    // purpose — follow vs unfollow are mutually exclusive, discovery-feed
+                    // containers are hidden off their tab, clip panels stay collapsed until
+                    // opened. Blanket-setting every match to VISIBLE force-showed all of that and
+                    // corrupted screens the rules were never meant to touch.
+                    if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
+                }
+            }
         }
-        anyHidden = hidTracker
+        anyHidden = hidAny
     }
+
+    /** Views this module set GONE, so a toggle-off restores exactly those and nothing else. */
+    private val HIDDEN = java.util.WeakHashMap<View, Boolean>()
 
     /** Tracks whether we currently have anything hidden, so [apply] can restore after a toggle-off. */
     @Volatile private var anyHidden = false

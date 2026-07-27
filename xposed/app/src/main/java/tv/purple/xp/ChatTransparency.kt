@@ -162,88 +162,79 @@ object ChatTransparency {
     private const val CHAT_WIDTH_MIN = 10
     private const val CHAT_WIDTH_MAX = 50
 
-    /** Twitch's own guidePercent, captured before our first write so "off" restores the exact
-     *  shipped split rather than a hard-coded guess. Weak-keyed: never pins a dead Activity. */
+    /** Twitch's own split, read from geometry before our first write, so turning the feature
+     *  off restores the exact shipped layout. Weak-keyed: never pins a dead Activity. */
     private val originalGuidePercent = java.util.WeakHashMap<View, Float>()
 
-    @Volatile private var fGuidePercent: java.lang.reflect.Field? = null
-    @Volatile private var fStartToEnd: java.lang.reflect.Field? = null
-    @Volatile private var structureLogged = false
+    /** Last percent we wrote per guideline, so a settled layout isn't rewritten every pass. */
+    private val lastWritten = java.util.WeakHashMap<View, Float>()
 
-    /** Find a declared field by name anywhere up the class hierarchy, made accessible. */
-    private fun fieldOf(obj: Any, name: String): java.lang.reflect.Field? = runCatching {
-        var c: Class<*>? = obj.javaClass
-        while (c != null) {
-            c.declaredFields.firstOrNull { it.name == name }?.let { it.isAccessible = true; return it }
-            c = c.superclass
-        }
-        null
-    }.getOrNull()
+    /** Cached Guideline.setGuidelinePercent(float). */
+    @Volatile private var mSetGuidePercent: java.lang.reflect.Method? = null
+    @Volatile private var structureLogged = false
 
     /**
      * Resize the landscape theatre chat panel to [pct] percent of screen width.
      *
      * @param panel the view matched by resource entry name "chat_wrapper"
-     * @param pct   10..50, or null to RESTORE Twitch's original split (portrait / feature off)
+     * @param pct   10..50, or null to RESTORE Twitch's split (portrait / feature off)
      *
-     * Returns cleanly with the layout untouched if the expected ConstraintLayout + chat_guideline
-     * structure isn't present.
+     * Returns cleanly with the layout untouched if the expected ConstraintLayout +
+     * chat_guideline structure isn't present.
+     *
+     * Deliberately uses NO field reflection. ConstraintLayout.LayoutParams is obfuscated at
+     * runtime (it shows up as e.g. "m69") and all of its fields are renamed, so guidePercent /
+     * startToEnd cannot be reached by name. Two things do survive R8, because the layout XML
+     * inflates them by fully-qualified string: the Guideline class itself and its public
+     * setGuidelinePercent(float). The CURRENT split is read from geometry instead of a field --
+     * a vertical guideline's laid-out x over the parent width IS the percent.
      */
     private fun applyChatWidth(panel: View, pct: Int?) {
         runCatching {
-            // Parent must hold a direct child named chat_guideline. Only a ConstraintLayout has a
-            // Guideline child, so this subsumes a parent class check without naming a class.
             val parent = panel.parent as? ViewGroup ?: return
             var guide: View? = null
             for (i in 0 until parent.childCount) {
                 val c = parent.getChildAt(i)
-                // A Guideline sets itself GONE in its constructor — don't skip GONE views here.
+                // A Guideline sets itself GONE in its constructor -- don't skip GONE views.
                 val e = runCatching { c.resources.getResourceEntryName(c.id) }.getOrNull()
                 if (e == "chat_guideline") { guide = c; break }
             }
             val guideline = guide ?: return
+            val width = parent.width
+            if (width <= 0) return                       // not laid out yet
 
-            val panelLp = panel.layoutParams ?: return
-            val guideLp = guideline.layoutParams ?: return
+            val current = guideline.left.toFloat() / width
 
-            // The panel's startToEnd must BE the guideline. This is the landscape-only signature:
-            // in portrait the panel is startToStart=parent with startToEnd UNSET, so this check
-            // alone stops us touching the portrait tree even if the orientation test were wrong.
-            val fSte = fStartToEnd ?: fieldOf(panelLp, "startToEnd")?.also { fStartToEnd = it } ?: return
-            if (fSte.getInt(panelLp) != guideline.id) return
-
-            // Still MATCH_CONSTRAINT? If Twitch ever gives the panel a fixed width, moving the
-            // guideline would no longer resize it — bail rather than half-apply.
-            if (panelLp.width != 0) return
-
-            val fGp = fGuidePercent ?: fieldOf(guideLp, "guidePercent")?.also { fGuidePercent = it } ?: return
-            val current = fGp.getFloat(guideLp)
-
-            if (!originalGuidePercent.containsKey(guideline) && current > 0f) {
+            // Snapshot Twitch's own split once, before we ever write. Guard the range so a
+            // half-laid-out frame (guideline at 0, or flush right) is never mistaken for it.
+            if (!originalGuidePercent.containsKey(guideline)) {
+                if (current <= 0.05f || current >= 0.95f) return
                 originalGuidePercent[guideline] = current
+                if (!structureLogged) {
+                    structureLogged = true
+                    log("CW structure ok: original split=" + current)
+                }
             }
-            if (!structureLogged) {
-                structureLogged = true
-                log("CW structure ok: guidePercent=$current")
-            }
+            val original = originalGuidePercent[guideline] ?: return
 
-            val target = if (pct == null) {
-                originalGuidePercent[guideline] ?: return
-            } else {
-                1f - pct.coerceIn(CHAT_WIDTH_MIN, CHAT_WIDTH_MAX) / 100f
-            }
+            val target = if (pct == null) original
+                         else 1f - pct.coerceIn(CHAT_WIDTH_MIN, CHAT_WIDTH_MAX) / 100f
 
-            // Idempotence is load-bearing: this runs from a global-layout listener, and assigning
-            // layoutParams calls requestLayout(), scheduling another pass. Only write on a real
-            // change or it spins forever.
-            if (kotlin.math.abs(current - target) < 0.001f) return
+            // Idempotence is load-bearing: this runs from a global-layout listener and
+            // setGuidelinePercent calls requestLayout, scheduling another pass. Skip when the
+            // layout already matches, and never write the same value twice.
+            if (kotlin.math.abs(current - target) < 0.005f) return
+            if (lastWritten[guideline]?.let { kotlin.math.abs(it - target) < 0.0001f } == true) return
 
-            fGp.setFloat(guideLp, target)
-            // Framework-level assignment → requestLayout → ConstraintLayout marks its hierarchy
-            // dirty and re-solves instead of reusing the cached solve.
-            guideline.layoutParams = guideLp
-        }.onFailure { log("CW applyChatWidth: $it") }
+            val m = mSetGuidePercent ?: runCatching {
+                guideline.javaClass.getMethod("setGuidelinePercent", java.lang.Float.TYPE)
+            }.getOrNull()?.also { mSetGuidePercent = it } ?: return
+
+            m.invoke(guideline, target)
+            lastWritten[guideline] = target
+        }.onFailure { log("CW applyChatWidth: " + it) }
     }
+
 
     private inline fun walk(root: View, action: (View) -> Unit) {
         val stack = ArrayDeque<View>()
