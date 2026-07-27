@@ -157,17 +157,20 @@ object PurpleMenu {
         Toggle("Disable Browser link disclaimer",
             "Turn off the display of twitch browser link disclaimers", "disable_link_disclaimer"),
         Toggle("Hide chat header",
-            "Enable this option to hide the chat header at the top of the chat", "hide_chat_header"),
-        Toggle("Hide message input", "Hide the message input field in the chat", "hide_message_input"),
+            "Enable this option to hide the chat header at the top of the chat",
+            "hide_chat_header", done = true),
+        Toggle("Hide message input", "Hide the message input field in the chat",
+            "hide_message_input", done = true),
         Toggle("Hide message input on landscape",
             "Enable this option to hide the message input field when the device is in landscape mode",
-            "auto_hide_message_input"),
+            "auto_hide_message_input", done = true),
         Toggle("Hide bits button", "Hide the bits button within the message input field",
-            "hide_bits_button"),
+            "hide_bits_button", done = true),
         Toggle("Hide leaderboards",
             "Enable this option to hide the leaderboard panel at the top of the chat",
-            "hide_leaderboards"),
-        Toggle("Disable HypeTrain", "Turn off the HypeTrain feature in the chat", "disable_hype_train"),
+            "hide_leaderboards", done = true),
+        Toggle("Disable HypeTrain", "Turn off the HypeTrain feature in the chat",
+            "disable_hype_train", done = true),
         Toggle("One chat lurker",
             "Activating this option hides the UI for message input and sending in the \"One Chat\" mode",
             "one_chat_lurker"),
@@ -193,7 +196,8 @@ object PurpleMenu {
             "Set the duration of the vibration in milliseconds for chat notifications",
             "vibration_duration", min = 10, max = 1000, def = 100, step = 10),
         Slide("Landscape chat width", "Configure the width of the chat view in landscape mode",
-            "landscape_chat_size_v3", min = 10, max = 50, def = 30),
+            ChatTransparency.KEY_CHAT_WIDTH, min = 10, max = 50,
+            def = ChatTransparency.CHAT_WIDTH_DEFAULT, done = true),
         Slide("Landscape split chat width",
             "Configure the width of the split chat view in landscape mode",
             "landscape_split_chat_size_v3", min = 10, max = 70, def = 50),
@@ -370,7 +374,11 @@ object PurpleMenu {
             is Toggle -> titleRow.addView(android.widget.Switch(ctx).apply {
                 isChecked = Settings.get(item.key, item.def)
                 isEnabled = item.done
-                setOnCheckedChangeListener { _, v -> Settings.set(item.key, v) }
+                setOnCheckedChangeListener { _, v ->
+                    Settings.set(item.key, v)
+                    // Hide-style toggles take effect on the live chat behind the menu.
+                    ViewHider.reapply()
+                }
             })
             is Sub -> titleRow.addView(TextView(ctx).apply {
                 text = "›"
@@ -417,7 +425,9 @@ object PurpleMenu {
                         if (fromUser) {
                             Settings.setInt(item.key, v)
                             // Live-preview the one slider that has a visible effect behind the menu.
-                            if (item.key == Settings.KEY_CHAT_OPACITY) ChatTransparency.reapply()
+                            if (item.key == Settings.KEY_CHAT_OPACITY ||
+                                item.key == ChatTransparency.KEY_CHAT_WIDTH
+                            ) ChatTransparency.reapply()
                         }
                     }
                     override fun onStartTrackingTouch(sb: SeekBar) {}

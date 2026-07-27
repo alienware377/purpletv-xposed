@@ -15,8 +15,10 @@ import java.lang.ref.WeakReference
  * Obfuscation-immune: we never name a Twitch class. We hook the framework
  * android.app.Activity lifecycle (onResume / onConfigurationChanged) and, when the device
  * is in LANDSCAPE, walk the decor view to find the chat side-panel by RESOURCE ENTRY NAME
- * (package-independent — see EmoteAutocomplete for the same trick) and set View.alpha to the
- * user's chosen opacity. In PORTRAIT we restore full opacity so the normal layout is unchanged.
+ * (package-independent — see EmoteAutocomplete for the same trick) and fade its BACKGROUND to the
+ * user's chosen opacity. Only the background drawable is faded, never View.alpha, so chat text and
+ * emotes stay fully opaque and readable over the see-through panel.
+ * In PORTRAIT we restore full opacity so the normal layout is unchanged.
  *
  * Applied on a short post-delay because the theater chat panel is inflated asynchronously
  * after the player goes fullscreen. [reapply] lets the settings slider update live.
@@ -108,13 +110,50 @@ object ChatTransparency {
             }
         }
 
-        // Dim the OUTERMOST present container (first in PANEL_IDS order); reset inner ones to 1f
-        // so alpha isn't multiplied across the nested chain.
-        var dimmed = false
+        // Fade ONLY the dark panel background, never the chat content.
+        //
+        // Setting View.alpha would composite the whole subtree — background, text and emotes — at
+        // the chosen opacity, which washes out the messages. Instead every matched view is held at
+        // alpha 1f and the opacity is pushed into the background DRAWABLE alpha, so the panel goes
+        // see-through while text and emotes stay fully opaque on top of it.
+        val bgAlpha = (alpha * 255f).toInt().coerceIn(0, 255)
+        var outermost: View? = null
         for (name in PANEL_IDS) {
             val v = matches[name] ?: continue
-            val target = if (!dimmed) { dimmed = true; alpha } else 1f
-            if (v.alpha != target) v.alpha = target
+            if (outermost == null) outermost = v
+            if (v.alpha != 1f) v.alpha = 1f   // undo whole-view dimming from earlier versions
+            // mutate() so we never alter a ColorDrawable shared with other Twitch views.
+            val bg = v.background?.mutate() ?: continue
+            if (bg.alpha != bgAlpha) bg.alpha = bgAlpha
+        }
+
+        applyWidth(act, outermost ?: return, landscape)
+    }
+
+    /** Landscape chat panel width, as a percentage of screen width. */
+    const val KEY_CHAT_WIDTH = "landscape_chat_size_v3"
+    const val CHAT_WIDTH_DEFAULT = 30
+
+    /** Original layout width of each panel we've resized, so portrait restores exactly. */
+    private val ORIG_WIDTH = java.util.WeakHashMap<View, Int>()
+
+    /**
+     * Applied to the same outermost container we dim, so width and opacity live on one view and
+     * can't fight each other. Portrait restores the width Twitch originally laid out.
+     */
+    private fun applyWidth(act: Activity, panel: View, landscape: Boolean) {
+        val lp = panel.layoutParams ?: return
+        if (!ORIG_WIDTH.containsKey(panel)) ORIG_WIDTH[panel] = lp.width
+
+        val target = if (landscape) {
+            val pct = Settings.getInt(KEY_CHAT_WIDTH, CHAT_WIDTH_DEFAULT).coerceIn(10, 50)
+            act.resources.displayMetrics.widthPixels * pct / 100
+        } else {
+            ORIG_WIDTH[panel] ?: return
+        }
+        if (lp.width != target) {
+            lp.width = target
+            panel.layoutParams = lp
         }
     }
 
