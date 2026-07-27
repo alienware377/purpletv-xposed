@@ -44,7 +44,22 @@ object ViewHider {
             "message_input_view_container")),
         // Same targets as above, but only while the device is in landscape.
         Rule("auto_hide_message_input", listOf("chat_message_input_view_container",
-            "message_input_view_container"), landscape = true)
+            "message_input_view_container"), landscape = true),
+
+        // --- Player ---
+        Rule("hide_unfollow_button", listOf("unfollow_button")),
+        // "Follow/Subscribe" is one setting covering both buttons in the player metadata bar.
+        Rule("hide_fsb", listOf("follow_button", "subscribe_button",
+            "extended_follow_button_container", "extended_subscribe_button_container")),
+        Rule("hide_player_create_clip_button", listOf("create_clip_button_compose_view",
+            "create_clip_text_button", "create_clip_panel")),
+        Rule("hide_player_live_share_button", listOf("share_button")),
+        Rule("disable_cast", listOf("cast_button")),
+
+        // --- View ---
+        Rule("hide_create_button", listOf("create_button")),
+        Rule("hide_discover_feed", listOf("discovery_feed_home_root", "discovery_feed_navigation",
+            "discovery_feed_pager_container"))
     )
 
     /** Every entry name any rule cares about, so the tree walk collects in one pass. */
