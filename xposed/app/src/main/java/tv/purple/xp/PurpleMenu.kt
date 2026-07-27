@@ -257,7 +257,7 @@ object PurpleMenu {
         Toggle("Twitch Stories", "Enables the display of Twitch Stories", "stories"),
         Drop("Navbar position", "", "bottom_navbar_position", listOf("Default", "Top", "Hidden")),
         Toggle("Show full stream cards in followed section", "", "followed_full_cards"),
-        Toggle("Hide Discover tab", "", "hide_discover_tab"),
+        Toggle("Hide Discover tab", "", "hide_discover_tab", done = true),
         Toggle("Hide \"Discovery feed\"", "", "hide_discover_feed", done = true),
         Toggle("Hide \"Followed Games\"", "", "hide_game_section"),
         Toggle("Hide \"Recent Watching\"", "", "hide_resume_watching_section"),

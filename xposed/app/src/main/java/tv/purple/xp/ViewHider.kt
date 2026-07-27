@@ -57,7 +57,12 @@ object ViewHider {
         Rule("disable_cast", listOf("cast_button")),
 
         // --- View ---
-        Rule("hide_create_button", listOf("create_button")),
+        // Entry names verified against the live 28.x view tree. The names taken from the older
+        // decoded resources (create_button, discover_tab) no longer match what Twitch inflates,
+        // so the current ones come first and the legacy names stay as fallbacks for other builds.
+        Rule("hide_create_button", listOf("viewer_bottom_nav_create_placeholder",
+            "custom_create_bottom_nav_button", "create_button")),
+        Rule("hide_discover_tab", listOf("viewer_bottom_nav_explore", "discover_tab")),
         Rule("hide_discover_feed", listOf("discovery_feed_home_root", "discovery_feed_navigation",
             "discovery_feed_pager_container"))
     )
