@@ -145,7 +145,9 @@ object ViewHider {
                 v.javaClass.getMethod("getMenu").invoke(v) as? android.view.Menu
             }.getOrNull() ?: return@walk
             val item = runCatching { menu.findItem(itemId) }.getOrNull() ?: return@walk
-            if (item.isVisible == hide) item.isVisible = !hide
+            // Guarded: the walk visits every menu-hosting view in the window, and some menus
+            // refuse mutation. An escaping throw here used to abort the whole pass silently.
+            runCatching { if (item.isVisible == hide) item.isVisible = !hide }
         }
     }
 
