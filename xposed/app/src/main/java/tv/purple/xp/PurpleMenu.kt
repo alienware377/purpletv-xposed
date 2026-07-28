@@ -88,6 +88,15 @@ object PurpleMenu {
         override val done: Boolean = true
     ) : Item()
 
+    /** A row that opens a screen built in code rather than declared here. Needed wherever the
+     *  content is dynamic — the keyword list is edited at runtime and can't be a static tree. */
+    class Custom(
+        override val title: String,
+        override val summary: String = "",
+        val onClick: (Context) -> Unit,
+        override val done: Boolean = true
+    ) : Item()
+
     // ---------------------------------------------------------------- tree
     //
     // Keys reuse the module's existing SharedPreferences names where a feature already works, so
@@ -193,9 +202,16 @@ object PurpleMenu {
             listOf("International Name (Username)", "International Name", "Username")),
         Drop("/me Style", "", ChatLineStyle.KEY_ME_STYLE,
             listOf("Disabled", "Colored", "Italic", "Italic + Colored"), done = true),
+        // Greyed out on purpose: this cannot work from the chat-line hook. For a LIVE deletion the
+        // message's own isDeleted flag is final and already false by the time the line is built —
+        // the deletion is recorded on a separate mutable UI model afterwards, and the
+        // "<message deleted>" placeholder is produced by a downstream renderer that discards the
+        // body entirely. Anything written into the line here is thrown away one step later.
+        // Making it work needs the original body cached at assembly time and swapped back in at
+        // the TextView level, which is a different mechanism than the rest of this screen uses.
         Drop("Deleted messages", "Choose how deleted messages are handled in the chat",
             ChatLineStyle.KEY_DELETED,
-            listOf("Default", "Mod", "Strikethrough", "Grey"), done = true),
+            listOf("Default", "Mod", "Strikethrough", "Grey")),
         Drop("Pinned messages", "Choose the behavior of pinned messages in the chat",
             "pinned_message", listOf("Default", "Disabled", "30 sec.")),
         Slide("Chat font size", "Adjust the font size for chat messages",
@@ -210,9 +226,16 @@ object PurpleMenu {
         Slide("Landscape split chat width",
             "Configure the width of the split chat view in landscape mode",
             "landscape_split_chat_size_v3", min = 10, max = 70, def = 50),
-        Sub("Highlighter", items = emptyList(), done = false),
+        Toggle("Highlight mentions of me",
+            "Tint the whole chat row when someone @mentions your account",
+            ChatHighlight.KEY_MENTION_ENABLED, done = true),
+        Custom("Highlighter",
+            "Tint chat rows containing a word, or sent by a given user",
+            { HighlightUi.showKeywords(it) }),
         Sub("Blacklist", items = emptyList(), done = false),
-        Sub("Change @mention color", items = emptyList(), done = false)
+        Custom("Change @mention color",
+            "Pick the tint used when you are mentioned",
+            { HighlightUi.showMentionColor(it) })
     )
 
     private val PLAYER = listOf(
@@ -265,7 +288,9 @@ object PurpleMenu {
         Drop("Navbar position", "", "bottom_navbar_position", listOf("Default", "Top", "Hidden")),
         Toggle("Show full stream cards in followed section", "", "followed_full_cards"),
         Toggle("Hide Discover tab", "", "hide_discover_tab", done = true),
-        Toggle("Hide \"Discovery feed\"", "", "hide_discover_feed", done = true),
+        Toggle("Hide \"Discovery feed\"",
+            "Removes the Live and Clips tabs from Home and keeps you on Following",
+            HomeTabs.KEY, done = true),
         Toggle("Hide \"Followed Games\"", "", "hide_game_section"),
         Toggle("Hide \"Recent Watching\"", "", "hide_resume_watching_section"),
         Toggle("Hide \"Offline Channels\"", "", "hide_offline_channel_section"),
@@ -389,6 +414,7 @@ object PurpleMenu {
                     // Both take effect on the live chat behind the menu.
                     ViewHider.reapply()
                     ChatAppearance.reapply()
+                    HomeTabs.reapply()
                     // Switching a badge source on for the first time has to fetch its manifest;
                     // switching one off is free (forUser filters on the toggle every render).
                     if (v) {
@@ -416,6 +442,11 @@ object PurpleMenu {
                 setTextColor(if (item.done) PURPLE else TEXT_DIM)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             }.also { titleRow.addView(it) }
+            is Custom -> titleRow.addView(TextView(ctx).apply {
+                text = "›"
+                setTextColor(TEXT_DIM)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            })
         }
         box.addView(titleRow)
 
@@ -465,6 +496,7 @@ object PurpleMenu {
                 }.onFailure { toast(ctx, "Couldn't open link") }
             }
             is Drop -> box.setOnClickListener { pickOption(ctx, item, valueView) }
+            is Custom -> box.setOnClickListener { item.onClick(ctx) }
             else -> {}
         }
         return box

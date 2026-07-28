@@ -67,6 +67,7 @@ class EntryHook : de.robv.android.xposed.IXposedHookLoadPackage {
         runCatching { ChannelPoints.install(ctx) }.onFailure { log("channel points failed: $it") }
         runCatching { SettingsEntry.install(lpparam) }.onFailure { log("settings entry failed: $it") }
         runCatching { ViewHider.install(lpparam) }.onFailure { log("view hider failed: $it") }
+        runCatching { HomeTabs.install(lpparam) }.onFailure { log("home tabs failed: $it") }
         runCatching { ChatAppearance.install(lpparam) }.onFailure { log("chat appearance failed: $it") }
     }
 }

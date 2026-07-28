@@ -72,6 +72,8 @@ object EmoteHooks {
                     .onFailure { log("identity inject error: $it") }
                 runCatching { ChatLineStyle.apply(param.result, param.args) }
                     .onFailure { log("line style error: $it") }
+                runCatching { ChatHighlight.apply(param.result, param.args) }
+                    .onFailure { log("highlight error: $it") }
             }
         })
         log("emote inject hook installed on ${Names.ASSEMBLER}.${Names.ASSEMBLER_METHOD} (field .${Names.BODY_FIELD})")

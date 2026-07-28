@@ -62,9 +62,18 @@ object ViewHider {
         // so the current ones come first and the legacy names stay as fallbacks for other builds.
         Rule("hide_create_button", listOf("viewer_bottom_nav_create_placeholder",
             "custom_create_bottom_nav_button", "create_button")),
-        Rule("hide_discover_tab", listOf("viewer_bottom_nav_explore", "discover_tab")),
-        Rule("hide_discover_feed", listOf("discovery_feed_home_root", "discovery_feed_navigation",
-            "discovery_feed_pager_container"))
+        Rule("hide_discover_tab", listOf("viewer_bottom_nav_explore", "discover_tab"))
+        // "hide_discover_feed" USED to live here and was actively dangerous. Its three targets:
+        //   discovery_feed_home_root       root view of the ENTIRE Home fragment -- hiding it
+        //                                  kills Home outright, Following tab included
+        //   discovery_feed_pager_container root view of the pager fragment that IS the "Live" and
+        //                                  "Clips" tabs, and parent of the error page, so hiding
+        //                                  it measures the feed at 0x0 and tips it into the
+        //                                  "Boo! Ghost sighting" state rather than just blanking
+        //   discovery_feed_navigation      never carried by any view; a navigation-graph id only
+        // Both real targets are FRAGMENT ROOTS, which the fragment manager sets back to VISIBLE on
+        // every rebind, so the rule also fought the framework on every layout pass. Removing the
+        // feed is now handled by hiding the individual TAB views instead -- see HomeTabs.
     )
 
     /** Every entry name any rule cares about, so the tree walk collects in one pass. */
@@ -113,6 +122,14 @@ object ViewHider {
         // Cheap exit: if nothing is switched on there's no reason to walk the tree at all.
         val active = RULES.filter { Settings.get(it.key, false) }
         val root = act.window?.decorView ?: return
+        // Report whenever the enabled set CHANGES rather than once ever. A one-shot log fired on
+        // the first layout pass and then went stale, which made it report "(none)" while a rule
+        // was in fact switched on -- a diagnostic that lies is worse than none at all.
+        val sig = active.joinToString(",") { it.key }
+        if (sig != lastActiveSig) {
+            lastActiveSig = sig
+            log("VH enabled rules: " + sig.ifEmpty { "(none)" })
+        }
         if (active.isEmpty() && !anyHidden) return
 
         val landscape = act.resources.configuration.orientation ==
@@ -140,7 +157,16 @@ object ViewHider {
             val hide = entry in shouldHide
             for (v in views) {
                 if (hide) {
-                    if (v.visibility != View.GONE) v.visibility = View.GONE
+                    if (v.visibility != View.GONE) {
+                        v.visibility = View.GONE
+                        // Rules match by entry name ANYWHERE in the tree, with no notion of which
+                        // screen they are on, so a rule written for the home feed can silently
+                        // hit a dialog or a channel page. Log each distinct hide so a screen that
+                        // breaks can be traced back to the exact rule that touched it.
+                        val where = act.javaClass.simpleName
+                        if (REPORTED.add("$entry@$where"))
+                            log("VH hid '$entry' on $where (rule fired)")
+                    }
                     HIDDEN[v] = true
                     hidAny = true
                 } else if (HIDDEN.remove(v) != null) {
@@ -158,6 +184,13 @@ object ViewHider {
 
     /** Views this module set GONE, so a toggle-off restores exactly those and nothing else. */
     private val HIDDEN = java.util.WeakHashMap<View, Boolean>()
+
+    /** "entry@Activity" pairs already logged, so the trace stays one line per rule per screen
+     *  instead of one per layout pass. */
+    private val REPORTED: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Last reported set of enabled rule keys, so a change is logged exactly once. */
+    @Volatile private var lastActiveSig: String? = null
 
     /** Tracks whether we currently have anything hidden, so [apply] can restore after a toggle-off. */
     @Volatile private var anyHidden = false
