@@ -27,6 +27,7 @@ object Names {
     const val ASSEMBLER_METHOD = "b"
     const val BODY_FIELD = "e"            // hn5.e : CharSequence = the message body
     const val NAME_FIELD = "c"            // hn5.c : CharSequence = "username: " (badges/pronouns)
+    const val TIME_FIELD = "a"            // hn5.a : CharSequence = timestamp, e.g. "2:42 "
 
     // --- (legacy/unused) stable readable model classes ---
     const val PKG = "tv.twitch.android.shared.chat.pub.messages.data"

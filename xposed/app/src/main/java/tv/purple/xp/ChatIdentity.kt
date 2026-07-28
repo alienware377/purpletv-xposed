@@ -70,6 +70,7 @@ object ChatIdentity {
 
         val sender = Sender.of(args) ?: return
         probeSlots(model)
+        Sender.probeMessageLabels(args)
 
         val badges = if (wantBadges) BadgeRepo.forUser(sender.userId) else emptyList()
         val pronoun = if (wantPronouns) Pronouns.forLogin(sender.login) else null
@@ -87,8 +88,9 @@ object ChatIdentity {
 
         // Pronoun first, so its insertion point isn't shifted by the badge inserts at index 0.
         // The slot reads "username: ", so the tag belongs just before the colon. A /me action line
-        // has no colon at all (hn5.f flags those and Twitch renders them without one), in which
-        // case appending at the end is correct.
+        // has no colon at all -- Twitch suppresses it for actions -- in which case appending at
+        // the end is correct. (The action flag lives on the MESSAGE, not on this line model; the
+        // line model's boolean is the layout direction. See ChatLineStyle.)
         if (pronoun != null) {
             val at = out.lastIndexOf(":").let { if (it < 0) out.length else it }
             val tag = " $pronoun"
@@ -174,6 +176,29 @@ object ChatIdentity {
             val login = LOGIN.find(s)?.groupValues?.get(1)?.trim() ?: return null
             if (login.isEmpty() || login == "null") return null
             return Info(id, login)
+        }
+
+        private val LABEL = Regex("([A-Za-z_][A-Za-z0-9_]*)=")
+        @Volatile private var labelsLogged = false
+
+        /**
+         * One-shot dump of the chat message's Kotlin data-class field LABELS.
+         *
+         * Only the names are emitted, never the values -- the message toString carries the actual
+         * chat text, and there is no reason to put a stranger's messages in logcat to learn what
+         * fields exist. Used to find a real message timestamp: the rendered timestamp slot is
+         * already formatted ("2:28 "), so seconds can't be recovered from it.
+         */
+        fun probeMessageLabels(args: Array<Any?>?) {
+            if (labelsLogged) return
+            args ?: return
+            val msg = runCatching { message(args) }.getOrNull() ?: return
+            labelsLogged = true
+            runCatching {
+                val s = msg.toString()
+                log("MSG fields: " + LABEL.findAll(s).map { it.groupValues[1] }.distinct()
+                    .joinToString(","))
+            }
         }
 
         private fun message(args: Array<Any?>): Any? {

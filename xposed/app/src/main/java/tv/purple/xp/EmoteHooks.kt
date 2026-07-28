@@ -70,6 +70,8 @@ object EmoteHooks {
                 // message, which carries the author's id and login. No second pin needed.
                 runCatching { ChatIdentity.inject(param.result, param.args) }
                     .onFailure { log("identity inject error: $it") }
+                runCatching { ChatLineStyle.apply(param.result, param.args) }
+                    .onFailure { log("line style error: $it") }
             }
         })
         log("emote inject hook installed on ${Names.ASSEMBLER}.${Names.ASSEMBLER_METHOD} (field .${Names.BODY_FIELD})")
