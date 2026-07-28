@@ -62,7 +62,7 @@ object ViewHider {
         // so the current ones come first and the legacy names stay as fallbacks for other builds.
         Rule("hide_create_button", listOf("viewer_bottom_nav_create_placeholder",
             "custom_create_bottom_nav_button", "create_button")),
-        Rule("hide_discover_tab", listOf("viewer_bottom_nav_explore", "discover_tab"))
+        // NOTE: "hide_discover_tab" is deliberately NOT a view rule -- see hideBrowseItem().
         // "hide_discover_feed" USED to live here and was actively dangerous. Its three targets:
         //   discovery_feed_home_root       root view of the ENTIRE Home fragment -- hiding it
         //                                  kills Home outright, Following tab included
@@ -118,17 +118,52 @@ object ViewHider {
         }
     }
 
+    const val KEY_BROWSE = "hide_discover_tab"
+
+    /**
+     * Hide the bottom bar's "Browse" entry.
+     *
+     * Done through the MENU, not by hiding its view. A bottom navigation bar rebuilds its item
+     * views whenever the selection changes, so a view set to GONE comes back as a freshly inflated
+     * VISIBLE one and only disappears again on the next layout pass -- which is exactly the
+     * half-second flash of the button (or of the gap it left) when another tab is tapped.
+     * The menu is the model behind those views, so an item hidden there simply never gets
+     * inflated and survives every rebuild.
+     *
+     * Obfuscation-immune: the item id is resolved from its resource ENTRY name, and the menu is
+     * reached through a public getMenu() that any menu-hosting view exposes. Views that have no
+     * such method, or whose menu lacks the item, are skipped.
+     */
+    private fun hideBrowseItem(act: Activity, hide: Boolean) {
+        val itemId = runCatching {
+            act.resources.getIdentifier("viewer_bottom_nav_explore", "id", act.packageName)
+        }.getOrDefault(0)
+        if (itemId == 0) return
+        val root = act.window?.decorView ?: return
+        walk(root) { v ->
+            val menu = runCatching {
+                v.javaClass.getMethod("getMenu").invoke(v) as? android.view.Menu
+            }.getOrNull() ?: return@walk
+            val item = runCatching { menu.findItem(itemId) }.getOrNull() ?: return@walk
+            if (item.isVisible == hide) item.isVisible = !hide
+        }
+    }
+
     private fun apply(act: Activity) {
         // Cheap exit: if nothing is switched on there's no reason to walk the tree at all.
         val active = RULES.filter { Settings.get(it.key, false) }
         val root = act.window?.decorView ?: return
+        // Menu-backed rather than view-backed, so it runs every pass regardless of the view rules.
+        runCatching { hideBrowseItem(act, Settings.get(KEY_BROWSE, false)) }
+
         // Report whenever the enabled set CHANGES rather than once ever. A one-shot log fired on
         // the first layout pass and then went stale, which made it report "(none)" while a rule
         // was in fact switched on -- a diagnostic that lies is worse than none at all.
-        val sig = active.joinToString(",") { it.key }
+        val sig = active.joinToString(",") { it.key } +
+            (if (Settings.get(KEY_BROWSE, false)) ",$KEY_BROWSE" else "")
         if (sig != lastActiveSig) {
             lastActiveSig = sig
-            log("VH enabled rules: " + sig.ifEmpty { "(none)" })
+            log("VH enabled rules: " + sig.trim(',').ifEmpty { "(none)" })
         }
         if (active.isEmpty() && !anyHidden) return
 
