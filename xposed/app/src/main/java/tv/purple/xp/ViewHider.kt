@@ -151,12 +151,65 @@ object ViewHider {
         }
     }
 
+    /**
+     * Keep the floating "+" centred on its own nav cell.
+     *
+     * The "+" is not laid out inside a cell; it is a separate button pinned to the CENTRE OF THE
+     * BAR. With five items the bar centre and the middle cell's centre coincide, so it looks right.
+     * Remove Browse and the four remaining cells re-share the bar, moving the create cell's centre
+     * while the button stays put -- which reads as a gap between Home and "+".
+     *
+     * Timing is the whole difficulty. The re-share happens well after the first layout passes, so a
+     * one-off correction runs while the offset is still legitimately zero and then never again.
+     * Hence the listener below: it re-checks on every layout of the bar itself, which is exactly
+     * when the cell can move.
+     */
+    private fun recentreCreateButton(root: View) {
+        var cell: View? = null
+        var button: View? = null
+        walk(root) { v ->
+            when (runCatching { v.resources.getResourceEntryName(v.id) }.getOrNull()) {
+                "viewer_bottom_nav_create_placeholder" -> cell = v
+                "custom_create_bottom_nav_button" -> button = v
+            }
+        }
+        val c = cell ?: return
+        val b = button ?: return
+        if (c.width == 0 || b.width == 0) return
+
+        if (LAYOUT_WIRED.add(c)) {
+            c.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                runCatching { centre(c, b) }
+            }
+        }
+        centre(c, b)
+    }
+
+    /** Views whose layout we already watch, so the listener is attached once. */
+    private val LAYOUT_WIRED = java.util.Collections.newSetFromMap(
+        java.util.WeakHashMap<View, Boolean>()
+    )
+
+    private fun centre(cell: View, button: View) {
+        if (cell.width == 0 || button.width == 0) return
+        // Measured in the shared window space: the two are not siblings, so their left/right are
+        // relative to different parents.
+        val cw = IntArray(2); cell.getLocationInWindow(cw)
+        val bw = IntArray(2); button.getLocationInWindow(bw)
+        val cellCentre = cw[0] + cell.width / 2f
+        // Subtract the translation already applied so repeated passes don't compound it.
+        val buttonCentre = bw[0] - button.translationX + button.width / 2f
+        val target = cellCentre - buttonCentre
+        if (kotlin.math.abs(button.translationX - target) > 0.5f) button.translationX = target
+    }
+
     private fun apply(act: Activity) {
         // Cheap exit: if nothing is switched on there's no reason to walk the tree at all.
         val active = RULES.filter { Settings.get(it.key, false) }
         val root = act.window?.decorView ?: return
         // Menu-backed rather than view-backed, so it runs every pass regardless of the view rules.
         runCatching { hideBrowseItem(act, Settings.get(KEY_BROWSE, false)) }
+        runCatching { recentreCreateButton(root) }
 
         // Report whenever the enabled set CHANGES rather than once ever. A one-shot log fired on
         // the first layout pass and then went stale, which made it report "(none)" while a rule
