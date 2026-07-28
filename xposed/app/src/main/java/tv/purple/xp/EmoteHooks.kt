@@ -66,6 +66,10 @@ object EmoteHooks {
         XposedBridge.hookAllMethods(asm, Names.ASSEMBLER_METHOD, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 runCatching { injectBody(param.result) }.onFailure { log("inject error: $it") }
+                // Badges + pronouns ride the SAME anchor: one of this call's arguments is the chat
+                // message, which carries the author's id and login. No second pin needed.
+                runCatching { ChatIdentity.inject(param.result, param.args) }
+                    .onFailure { log("identity inject error: $it") }
             }
         })
         log("emote inject hook installed on ${Names.ASSEMBLER}.${Names.ASSEMBLER_METHOD} (field .${Names.BODY_FIELD})")
@@ -174,7 +178,7 @@ object EmoteHooks {
     private fun hasWirableEmote(cs: Spanned): Boolean {
         if (cs.getSpans(0, cs.length, PtvEmoteSpan::class.java).isNotEmpty()) return true
         for (sp in cs.getSpans(0, cs.length, ImageSpan::class.java)) {
-            if (sp is PtvEmoteSpan) continue
+            if (sp is PtvEmoteSpan || sp is ChatIdentity.PtvBadgeSpan) continue
             val st = cs.getSpanStart(sp); val en = cs.getSpanEnd(sp)
             if (st in 0 until en) {
                 val name = cs.subSequence(st, en).toString().trim()
@@ -255,7 +259,9 @@ object EmoteHooks {
             if (within(sp)) return Hit(sp.emoteName, Favorites.isFavoritable(sp.emoteName), isPtv = true)
         }
         for (sp in cs.getSpans(off, off, ImageSpan::class.java)) {
-            if (sp is PtvEmoteSpan) continue
+            // A badge's covered text is a lone non-breaking space, so it could never match an
+            // emote name — but skipping it explicitly keeps tap handling honest.
+            if (sp is PtvEmoteSpan || sp is ChatIdentity.PtvBadgeSpan) continue
             val st = cs.getSpanStart(sp); val en = cs.getSpanEnd(sp)
             if (st < 0 || en <= st) continue
             val name = cs.subSequence(st, en).toString().trim()

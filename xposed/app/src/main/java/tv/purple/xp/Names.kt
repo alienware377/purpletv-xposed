@@ -26,6 +26,7 @@ object Names {
     const val ASSEMBLER = "ik5"           // ik5.b(...) -> hn5 (chat line model)
     const val ASSEMBLER_METHOD = "b"
     const val BODY_FIELD = "e"            // hn5.e : CharSequence = the message body
+    const val NAME_FIELD = "c"            // hn5.c : CharSequence = "username: " (badges/pronouns)
 
     // --- (legacy/unused) stable readable model classes ---
     const val PKG = "tv.twitch.android.shared.chat.pub.messages.data"

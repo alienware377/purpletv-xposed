@@ -623,6 +623,11 @@ object EmoteRepo {
         }
     }
 
+    /** Shared HTTP for sibling repos (BadgeRepo, Pronouns) so the module keeps ONE OkHttpClient
+     *  — a second client would mean a second connection pool and dispatcher thread set. */
+    fun httpGet(url: String): String = get(url)
+    fun httpBytes(url: String): ByteArray = getBytes(url)
+
     private fun getBytes(url: String): ByteArray {
         http.newCall(Request.Builder().url(url).build()).execute().use { r ->
             if (!r.isSuccessful) error("HTTP ${r.code} for $url")

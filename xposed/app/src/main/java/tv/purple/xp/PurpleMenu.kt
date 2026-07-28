@@ -118,19 +118,25 @@ object PurpleMenu {
             def = EmoteQuality.DEFAULT, done = true)
     )
 
+    // BTTV badges stay greyed out: its badge images are SVG, which Android's image decoders can't
+    // read, so it needs a rasterizer rather than another manifest parser. See BadgeRepo.
     private val BADGES = listOf(
-        Toggle("FFZ badges", "Enable support for FrankerFaceZ (FFZ) badges in the chat", "ffz_badges"),
-        Toggle("Chatterino badges", "Enable support for Chatterino badges in the chat", "cha_badges"),
+        Toggle("FFZ badges", "Enable support for FrankerFaceZ (FFZ) badges in the chat",
+            BadgeRepo.KEY_FFZ, def = true, done = true),
+        Toggle("Chatterino badges", "Enable support for Chatterino badges in the chat",
+            BadgeRepo.KEY_CHA, def = true, done = true),
         Toggle("Homies badges", "Enable support for Homies badges in the chat", "homies_badges"),
         Toggle("BTTV Badges", "Enable support for BetterTTV (BTTV) badges in the chat", "bttv_badges"),
-        Toggle("DankChat badges", "Enable support for DankChat badges in the chat", "dankchat_badges"),
-        Toggle("Chatsen badges", "Enable support for Chatsen badges in the chat", "chatsen_badges")
+        Toggle("DankChat badges", "Enable support for DankChat badges in the chat",
+            BadgeRepo.KEY_DANK, def = true, done = true),
+        Toggle("Chatsen badges", "Enable support for Chatsen badges in the chat",
+            BadgeRepo.KEY_CHATSEN, def = true, done = true)
     )
 
     private val THIRD_PARTY = listOf(
         Sub("Emotes", items = EMOTES),
         Sub("Badges", items = BADGES),
-        Toggle("Pronouns", "https://pronouns.alejo.io/", "pronouns")
+        Toggle("Pronouns", "https://pronouns.alejo.io/", Pronouns.KEY, def = true, done = true)
     )
 
     private val CHAT = listOf(
@@ -382,6 +388,11 @@ object PurpleMenu {
                     // Both take effect on the live chat behind the menu.
                     ViewHider.reapply()
                     ChatAppearance.reapply()
+                    // Switching a badge source on for the first time has to fetch its manifest;
+                    // switching one off is free (forUser filters on the toggle every render).
+                    if (v) {
+                        if (item.key == Pronouns.KEY) Pronouns.loadAsync() else BadgeRepo.refresh()
+                    }
                 }
             })
             is Sub -> titleRow.addView(TextView(ctx).apply {
