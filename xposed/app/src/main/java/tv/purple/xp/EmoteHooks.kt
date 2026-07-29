@@ -65,15 +65,29 @@ object EmoteHooks {
         val asm = Names.cls(lp, Names.ASSEMBLER) ?: return
         XposedBridge.hookAllMethods(asm, Names.ASSEMBLER_METHOD, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
-                runCatching { injectBody(param.result) }.onFailure { log("inject error: $it") }
-                // Badges + pronouns ride the SAME anchor: one of this call's arguments is the chat
-                // message, which carries the author's id and login. No second pin needed.
-                runCatching { ChatIdentity.inject(param.result, param.args) }
-                    .onFailure { log("identity inject error: $it") }
+                // Decided first so a hidden line can skip the decoration below, but APPLIED last:
+                // ChatLineStyle replaces the body wholesale when it recovers a deleted message,
+                // which would take the marker with it.
+                val hide = runCatching { Blacklist.matches(param.args) }
+                    .onFailure { log("blacklist match error: $it") }
+                    .getOrDefault(false)
+
+                if (!hide) {
+                    runCatching { injectBody(param.result) }.onFailure { log("inject error: $it") }
+                    // Badges + pronouns ride the SAME anchor: one of this call's arguments is the
+                    // chat message, which carries the author's id and login. No second pin needed.
+                    runCatching { ChatIdentity.inject(param.result, param.args) }
+                        .onFailure { log("identity inject error: $it") }
+                }
                 runCatching { ChatLineStyle.apply(param.result, param.args) }
                     .onFailure { log("line style error: $it") }
-                runCatching { ChatHighlight.apply(param.result, param.args) }
-                    .onFailure { log("highlight error: $it") }
+                if (hide) {
+                    runCatching { Blacklist.mark(param.result) }
+                        .onFailure { log("blacklist mark error: $it") }
+                } else {
+                    runCatching { ChatHighlight.apply(param.result, param.args) }
+                        .onFailure { log("highlight error: $it") }
+                }
             }
         })
         log("emote inject hook installed on ${Names.ASSEMBLER}.${Names.ASSEMBLER_METHOD} (field .${Names.BODY_FIELD})")
@@ -98,6 +112,12 @@ object EmoteHooks {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val tv = param.thisObject as? TextView ?: return
                         val cs = param.args[0] as? CharSequence ?: return
+                        // First: a blacklisted row is collapsed here, and nothing below is worth
+                        // doing to a line that will not be drawn.
+                        val hidden = runCatching { BlacklistRows.onSetText(tv, cs) }
+                            .onFailure { log("blacklist row error: $it") }
+                            .getOrDefault(false)
+                        if (hidden) return
                         runCatching { startAnimatedSpans(tv, cs) }
                         // Wire tap/long-press once per TextView that carries an emote we care about:
                         // our injected 7TV/etc spans (tap = preview) OR a native Twitch emote span

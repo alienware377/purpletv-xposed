@@ -6,22 +6,14 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.LineBackgroundSpan
 import de.robv.android.xposed.XposedHelpers
-import java.lang.reflect.Field
-import java.lang.reflect.Modifier
 
 /**
  * Keyword highlighting and @mention colouring.
  *
- * Both work off the chat message's TOKEN list rather than the rendered text, which is what makes
- * mention detection exact: a mention token carries an isLocalUser flag, so "did this message
- * mention me" needs no knowledge of the logged-in account and no substring matching against a
- * username that might also appear as ordinary text.
- *
- * IMPORTANT: the R8-kept `MessageToken$MentionToken` in the pub messages package is NOT what live
- * chat uses -- it is produced by a tokenizer that never fires on this path, so `instanceof` against
- * it matches nothing. The live tokens are an obfuscated hierarchy. They are identified the same way
- * everything else here is: by the Kotlin-generated toString() labels, which R8 leaves verbatim
- * ("MentionToken(", "TextToken(" and so on).
+ * Both work off the chat message's TOKEN list rather than the rendered text (see [ChatTokens]),
+ * which is what makes mention detection exact: a mention token carries an isLocalUser flag, so
+ * "did this message mention me" needs no knowledge of the logged-in account and no substring
+ * matching against a username that might also appear as ordinary text.
  *
  * The highlight itself is drawn with a [LineBackgroundSpan], which paints the full width of the
  * TextView line. A BackgroundColorSpan would only cover the glyphs, leaving a ragged edge on
@@ -89,7 +81,7 @@ object ChatHighlight {
         val words = keywords()
         if (!mentionOn && words.isEmpty()) return
 
-        val msg = Tokens.message(args) ?: return
+        val msg = ChatTokens.message(args) ?: return
         val color = matchColor(msg, mentionOn, words) ?: return
 
         // Paint from the BODY slot: it is the one slot present on every line and it spans the
@@ -113,7 +105,7 @@ object ChatHighlight {
 
     /** First matching colour, checking @mention, then username rules, then per-word rules. */
     private fun matchColor(msg: Any, mentionOn: Boolean, words: List<Keyword>): Int? {
-        if (mentionOn && Tokens.mentionsLocalUser(msg))
+        if (mentionOn && ChatTokens.mentionsLocalUser(msg))
             return Settings.getInt(KEY_MENTION_COLOR, MENTION_COLOR_DEFAULT)
         if (words.isEmpty()) return null
 
@@ -128,7 +120,7 @@ object ChatHighlight {
         val insensitive = words.filter { it.type == Type.INSENSITIVE }
         if (sensitive.isEmpty() && insensitive.isEmpty()) return null
 
-        for (text in Tokens.textOf(msg)) {
+        for (text in ChatTokens.textOf(msg)) {
             for (w in text.split(' ', '\t', '\n')) {
                 if (w.isBlank()) continue
                 sensitive.firstOrNull { it.word == w }?.let { return it.color }
@@ -149,80 +141,6 @@ object ChatHighlight {
             p.color = color
             canvas.drawRect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), p)
             p.color = prev
-        }
-    }
-
-    // ---------------------------------------------------------------- token access
-
-    private object Tokens {
-        private const val MSG_PREFIX = "LiveChatMessage("
-        private const val MENTION = "MentionToken("
-        private const val TEXT = "TextToken(text="
-        private val PREFIXES = listOf(MENTION, TEXT, "EmoteToken(", "UrlToken(",
-            "BitsToken(", "CensoredTextToken(")
-
-        @Volatile private var argIndex = -1
-        @Volatile private var msgClass: Class<*>? = null
-        @Volatile private var fTokens: Field? = null
-
-        fun message(args: Array<Any?>?): Any? {
-            args ?: return null
-            val cached = msgClass
-            if (cached != null) {
-                val a = args.getOrNull(argIndex)
-                if (a != null && cached.isInstance(a)) { resolve(a); return a }
-            }
-            for (i in args.indices) {
-                val a = args[i] ?: continue
-                val cn = a.javaClass.name
-                if (cn.startsWith("java.") || cn.startsWith("android.")) continue
-                val s = runCatching { a.toString() }.getOrNull() ?: continue
-                if (!s.startsWith(MSG_PREFIX)) continue
-                argIndex = i; msgClass = a.javaClass
-                resolve(a)
-                return a
-            }
-            return null
-        }
-
-        /** Find the token list: the List field whose elements identify as known token types.
-         *  Retried until a message with a non-empty list comes through. */
-        private fun resolve(msg: Any) {
-            if (fTokens != null) return
-            for (f in msg.javaClass.declaredFields) {
-                if (Modifier.isStatic(f.modifiers)) continue
-                if (!List::class.java.isAssignableFrom(f.type)) continue
-                val v = runCatching { f.isAccessible = true; f.get(msg) as? List<*> }.getOrNull()
-                val first = v?.firstOrNull() ?: continue
-                val s = runCatching { first.toString() }.getOrNull() ?: continue
-                if (PREFIXES.none { s.startsWith(it) }) continue
-                fTokens = f
-                log("HL token field='${f.name}'")
-                return
-            }
-        }
-
-        private fun list(msg: Any): List<*> =
-            runCatching { fTokens?.get(msg) as? List<*> }.getOrNull() ?: emptyList<Any>()
-
-        /** True when a mention token is flagged as referring to the logged-in user. */
-        fun mentionsLocalUser(msg: Any): Boolean {
-            for (t in list(msg)) {
-                val s = runCatching { t?.toString() }.getOrNull() ?: continue
-                if (s.startsWith(MENTION) && s.contains("isLocalUser=true")) return true
-            }
-            return false
-        }
-
-        /** Plain-text runs only, so keywords can't match an emote name or a url. */
-        fun textOf(msg: Any): List<String> {
-            val out = ArrayList<String>(2)
-            for (t in list(msg)) {
-                val s = runCatching { t?.toString() }.getOrNull() ?: continue
-                if (!s.startsWith(TEXT)) continue
-                out.add(s.substring(TEXT.length).removeSuffix(")"))
-            }
-            return out
         }
     }
 }

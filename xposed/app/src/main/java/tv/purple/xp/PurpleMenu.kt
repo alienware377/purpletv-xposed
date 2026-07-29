@@ -232,7 +232,9 @@ object PurpleMenu {
         Custom("Highlighter",
             "Tint chat rows containing a word, or sent by a given user",
             { HighlightUi.showKeywords(it) }),
-        Sub("Blacklist", items = emptyList(), done = false),
+        Custom("Blacklist",
+            "Hide chat messages containing a word, or sent by a given user",
+            { BlacklistUi.show(it) }),
         Custom("Change @mention color",
             "Pick the tint used when you are mentioned",
             { HighlightUi.showMentionColor(it) })
