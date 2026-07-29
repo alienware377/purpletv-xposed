@@ -151,7 +151,93 @@ object ViewHider {
             // Guarded: the walk visits every menu-hosting view in the window, and some menus
             // refuse mutation. An escaping throw here used to abort the whole pass silently.
             runCatching { if (item.isVisible == hide) item.isVisible = !hide }
+            runCatching { dumpNav(v) }
         }
+    }
+
+    private const val CREATE_BUTTON = "custom_create_bottom_nav_button"
+    private const val CREATE_CELL = "viewer_bottom_nav_create_placeholder"
+
+    /** Horizontal correction currently applied to a create button, so the next pass can tell the
+     *  difference between "already centred" and "never moved". */
+    private val NUDGED = java.util.WeakHashMap<View, Int>()
+
+    /**
+     * Sit the floating "+" on its own nav cell.
+     *
+     * Hiding Browse leaves four evenly spaced cells, but the create button is not one of them — it
+     * is a separate view pinned to the centre of the BAR. With five cells the centre happened to be
+     * its cell too; with four it is not, so it drifts ~196px right of the cell and opens a gap next
+     * to Home.
+     *
+     * Corrected with a right MARGIN rather than translationX. Three earlier attempts used
+     * translationX and none of them ever took effect on device — the geometry was right and both
+     * views were reachable, but something on Twitch's side resets it. A margin is consumed by the
+     * parent's own layout instead of being a draw-time transform, so it survives.
+     *
+     * Self-correcting rather than a fixed offset: it measures the miss on every pass and folds it
+     * into the correction already applied, so it converges to zero, needs no knowledge of how many
+     * cells there are, and undoes itself when Browse is switched back on.
+     */
+    private fun recentreCreateButton(root: View) {
+        var button: View? = null
+        var cell: View? = null
+        walk(root) { v ->
+            if (v.width == 0) return@walk
+            when (runCatching { v.resources.getResourceEntryName(v.id) }.getOrNull()) {
+                CREATE_BUTTON -> button = v
+                CREATE_CELL -> cell = v
+            }
+        }
+        val b = button ?: return
+        val c = cell ?: return
+        val lp = b.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+
+        val pos = IntArray(2)
+        b.getLocationInWindow(pos); val bCentre = pos[0] + b.width / 2
+        c.getLocationInWindow(pos); val cCentre = pos[0] + c.width / 2
+
+        val miss = bCentre - cCentre
+        // Gate on the miss actually mattering. Writing every pass would schedule another layout
+        // from inside one, which never settles.
+        if (kotlin.math.abs(miss) <= 2) return
+
+        // A larger right margin pulls a centre-aligned child left, so the correction is additive.
+        val applied = (NUDGED[b] ?: 0) + miss
+        lp.rightMargin = applied.coerceAtLeast(0)
+        b.layoutParams = lp
+        NUDGED[b] = lp.rightMargin
+        log("VH create button off by $miss, right margin now ${lp.rightMargin}")
+    }
+
+    /** Last reported bottom-bar geometry, so a change is logged once instead of every pass. */
+    @Volatile private var lastNavSig: String? = null
+
+    /**
+     * Report the bottom bar's real geometry.
+     *
+     * Logged on CHANGE rather than once, because the bar re-shares its cells well after the first
+     * layout pass: a one-shot latch reports the pre-change state and then lies about it forever,
+     * which is the exact mistake that made three earlier attempts at this look like they worked.
+     *
+     * Coordinates are in the window, since the floating create button is not a child of the item
+     * row and its left/right are relative to a different parent.
+     */
+    private fun dumpNav(bar: View) {
+        if (bar.width == 0) return
+        val root = (bar.parent as? ViewGroup) ?: return
+        val pos = IntArray(2)
+        val sb = StringBuilder("NAV bar w=${bar.width}")
+        walk(root) { v ->
+            if (v.width == 0) return@walk
+            val entry = runCatching { v.resources.getResourceEntryName(v.id) }.getOrNull()
+                ?: return@walk
+            if (!entry.startsWith("viewer_bottom_nav") && entry != CREATE_BUTTON) return@walk
+            v.getLocationInWindow(pos)
+            sb.append(" | $entry vis=${v.visibility} x=${pos[0]} w=${v.width} c=${pos[0] + v.width / 2}")
+        }
+        val sig = sb.toString()
+        if (sig != lastNavSig) { lastNavSig = sig; log(sig) }
     }
 
     private fun apply(act: Activity) {
@@ -160,6 +246,7 @@ object ViewHider {
         val root = act.window?.decorView ?: return
         // Menu-backed rather than view-backed, so it runs every pass regardless of the view rules.
         runCatching { hideBrowseItem(act, Settings.get(KEY_BROWSE, false)) }
+        runCatching { recentreCreateButton(root) }
 
         // Report whenever the enabled set CHANGES rather than once ever. A one-shot log fired on
         // the first layout pass and then went stale, which made it report "(none)" while a rule
