@@ -51,8 +51,19 @@ class EntryHook : de.robv.android.xposed.IXposedHookLoadPackage {
             android.provider.Settings.Global.getInt(ctx.contentResolver, "purplexp_disable", 0) == 1
         }.getOrDefault(false)
         if (disabled) { log("DISABLED via purplexp_disable=1 — no features wired"); return }
-        log("Twitch context ready; wiring features")
         runCatching { Settings.init(ctx) }.onFailure { log("settings init failed: $it") }
+
+        // Master switch. Off means the app must behave like stock Twitch, so nothing below is
+        // wired -- but the settings entry still is, otherwise the only way back would be to
+        // reinstall. That screen shows just the one switch while we are off.
+        if (!Settings.get(Settings.KEY_ENABLED, true)) {
+            log("PurpleTV is switched OFF — wiring the settings entry only")
+            runCatching { SettingsEntry.install(lpparam) }
+                .onFailure { log("settings entry failed: $it") }
+            return
+        }
+
+        log("Twitch context ready; wiring features")
         runCatching { EmoteRepo.loadGlobalsAsync() }.onFailure { log("emote fetch wire failed: $it") }
         runCatching { EmoteRepo.harvestTwitchAsync(ctx) }.onFailure { log("twitch harvest wire failed: $it") }
         runCatching { EmoteRepo.loadTwitchGlobalAsync() }.onFailure { log("twitch global wire failed: $it") }

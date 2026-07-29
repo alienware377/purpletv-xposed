@@ -1,14 +1,24 @@
-# PurpleTV XP — 7TV, BTTV & FFZ Emotes for the Twitch Android App
+# PurpleTV ReVive — Continuation of the great work
 
-**An Xposed / LSPosed module that adds third-party emotes, emote autocomplete, a favorites bar, automatic channel-point claiming and adjustable landscape chat opacity to the official Twitch app for Android.**
+**An Xposed / LSPosed module that brings third-party emotes, badges, pronouns and a pile of chat quality-of-life tweaks to the official Twitch app for Android.**
 
 If you have ever wanted BetterTTV, FrankerFaceZ and 7TV emotes to actually render in Twitch mobile chat instead of showing up as plain text, this module does that — without replacing the Twitch app and without touching your login.
 
-[![Latest release](https://img.shields.io/github/v/release/alienware377/purpletv-xposed?label=download&style=flat-square)](https://github.com/alienware377/purpletv-xposed/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/alienware377/purpletv-revive?label=download&style=flat-square)](https://github.com/alienware377/purpletv-revive/releases/latest)
 [![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3ddc84?style=flat-square)](#requirements)
 [![Xposed](https://img.shields.io/badge/Xposed-LSPosed%20%7C%20LSPatch-9146ff?style=flat-square)](#installation)
 
 ---
+
+## What this module will never do
+
+**There is no ad blocking, and there are no money-related mods of any kind.** That is a deliberate design decision, not a missing feature — and pull requests adding either will be declined.
+
+- **No ad blocking.** Ads are how Twitch and the streamers on it get paid.
+- **No Bits, subscription, Turbo or payment workarounds.** Nothing here touches money, anywhere.
+- **No view-botting, auto-chatting, or faked engagement.**
+
+We fully support Twitch and the people who make a living on it. This module is about the *chat reading* experience — emotes, badges, and readability — and it is not interested in taking anything away from the platform or from creators.
 
 ## Features
 
@@ -20,9 +30,17 @@ If you have ever wanted BetterTTV, FrankerFaceZ and 7TV emotes to actually rende
 | **Emote autocomplete** | Start typing an emote name — no leading colon required — and pick it from an inline suggestion strip. |
 | **Favorites bar** | Pin your most-used Twitch and subscriber emotes to a bar inside the native emote picker. Persists across channels and restarts. |
 | **Auto-claim channel points** | Bonus chests are claimed automatically in the background, whether or not the chest is on screen. |
-| **Landscape chat opacity** | Make the theater-mode chat panel semi-transparent so you can see more of the stream behind it. |
+| **Third-party badges** | FFZ, Chatterino, DankChat and Chatsen badges shown next to usernames. |
+| **Pronouns** | Pronoun tags from pronouns.alejo.io shown next to usernames. |
+| **Timestamps** | Nine timestamp formats, including seconds, which Twitch itself cannot show. |
+| **Deleted messages** | Show what a deleted message actually said, struck through, greyed, or plain. Works as an ordinary viewer, not only as a moderator. |
+| **Highlighter** | Tint a whole chat row when it contains a word, or comes from a given user. Separate colour for `@mentions` of you. |
+| **Blacklist** | Hide matching chat messages completely, with no gap left behind. |
+| **`/me` styling** | Italic, coloured, or both. |
+| **Chat appearance** | Font size, alternating row backgrounds, landscape chat width and opacity. |
+| **Home tab tidy-up** | Remove the Live and Clips tabs to land on Following, and hide the Browse tab. |
 
-Everything is opt-in and individually toggleable.
+Everything is opt-in and individually toggleable — and the whole module can be switched off in one tap, see [Turning it off](#turning-it-off).
 
 ## Screenshots
 
@@ -38,7 +56,7 @@ Everything is opt-in and individually toggleable.
 
 ### Rooted — LSPosed
 
-1. Download `purpletv-xp.apk` from the [latest release](https://github.com/alienware377/purpletv-xposed/releases/latest).
+1. Download `purpletv-xp.apk` from the [latest release](https://github.com/alienware377/purpletv-revive/releases/latest).
 2. Install it like a normal app.
 3. Open LSPosed → **Modules** → enable **PurpleTV XP**.
 4. In the module's scope list, tick **Twitch**.
@@ -46,7 +64,7 @@ Everything is opt-in and individually toggleable.
 
 ### Non-rooted — LSPatch
 
-1. Download `purpletv-xp.apk` from the [latest release](https://github.com/alienware377/purpletv-xposed/releases/latest).
+1. Download `purpletv-xp.apk` from the [latest release](https://github.com/alienware377/purpletv-revive/releases/latest).
 2. In LSPatch, select your installed Twitch app, choose **Integrated** patch mode, and add `purpletv-xp.apk` as an embedded module.
 3. Install the patched Twitch APK that LSPatch produces.
 
@@ -59,13 +77,19 @@ Open Twitch and start watching any channel. Third-party emotes load automaticall
 - **Emote autocomplete** — just start typing an emote name in the chat box.
 - **Add a favorite** — long-press any Twitch or subscriber emote in the native emote picker.
 - **Remove a favorite** — long-press it in the favorites bar.
-- **Settings** — long-press the chat input box to open the module's settings.
+- **Settings** — open Twitch's own **Settings** screen; **PurpleTV** is the first row.
+
+## Turning it off
+
+The first row of the PurpleTV settings screen is **PurpleTV enabled**. Turn it off and restart the Twitch app, and you get the stock Twitch app back — no hooks are installed at all.
+
+The settings row itself stays put while the module is switched off, showing just that one switch, so you can always turn it back on. Your other settings are remembered while it is off. **A restart of the Twitch app is required either way**, because the module installs its hooks once, when the app starts.
 
 ## Building from source
 
 ```bash
-git clone https://github.com/alienware377/purpletv-xposed.git
-cd purpletv-xposed/xposed
+git clone https://github.com/alienware377/purpletv-revive.git
+cd purpletv-revive/xposed
 ./gradlew :app:assembleRelease
 ```
 
@@ -84,7 +108,7 @@ The result is a module that keeps working across Twitch updates far longer than 
 
 ## Compatibility
 
-Tested against recent Twitch Android releases. Because the module avoids obfuscated identifiers, it generally survives app updates. If a feature stops working after a Twitch update, please [open an issue](https://github.com/alienware377/purpletv-xposed/issues) with your Twitch version number.
+Tested against recent Twitch Android releases. Because the module avoids obfuscated identifiers, it generally survives app updates. If a feature stops working after a Twitch update, please [open an issue](https://github.com/alienware377/purpletv-revive/issues) with your Twitch version number.
 
 ## FAQ
 
@@ -92,7 +116,13 @@ Tested against recent Twitch Android releases. Because the module avoids obfusca
 The module reads third-party emote APIs and uses Twitch's own GraphQL endpoints with your existing session. It does not automate chat messages or viewing. That said, any client modification is against Twitch's Terms of Service — use it at your own risk.
 
 **Does it block ads?**
-No. Ad blocking is deliberately not implemented.
+No, and it never will. See [What this module will never do](#what-this-module-will-never-do). Ads pay Twitch and the streamers; blocking them takes money out of creators' pockets.
+
+**Does it unlock subs, Bits, Turbo or anything paid?**
+No. There are no money-related mods of any kind, deliberately.
+
+**How do I get the normal Twitch app back?**
+Turn off **PurpleTV enabled** at the top of the module's settings and restart Twitch. See [Turning it off](#turning-it-off).
 
 **Does it work without root?**
 Yes, via LSPatch. See [Installation](#installation).

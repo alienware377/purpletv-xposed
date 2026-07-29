@@ -17,6 +17,13 @@ import android.content.Context
 object Settings {
     private const val PREFS = "ptv_settings"
 
+    /**
+     * Master switch. When off, the module wires nothing but its own settings entry, so the app
+     * behaves exactly like stock Twitch and the switch itself is still reachable to turn back on.
+     * Read once at startup, hence the restart requirement.
+     */
+    const val KEY_ENABLED = "mod_enabled"
+
     const val KEY_AUTOCOMPLETE = "emote_autocomplete"
     const val KEY_SRC_SEVENTV = "src_seventv"
     const val KEY_SRC_BTTV = "src_bttv"

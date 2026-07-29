@@ -313,16 +313,23 @@ object PurpleMenu {
     )
 
     private val INFO = listOf(
-        Link("Source code", "github.com/alienware377/purpletv-xposed",
-            "https://github.com/alienware377/purpletv-xposed"),
+        Link("Source code", "github.com/alienware377/purpletv-revive",
+            "https://github.com/alienware377/purpletv-revive"),
         Link("Report an issue", "Bug reports and feature requests",
-            "https://github.com/alienware377/purpletv-xposed/issues"),
+            "https://github.com/alienware377/purpletv-revive/issues"),
         Link("7TV", "7tv.app", "https://7tv.app"),
         Link("BetterTTV", "betterttv.com", "https://betterttv.com"),
         Link("FrankerFaceZ", "frankerfacez.com", "https://frankerfacez.com")
     )
 
+    /** The master switch, and the only row shown while it is off. */
+    private val MASTER = Toggle("PurpleTV enabled",
+        "Turn this off to get the stock Twitch app back. Everything else stays as you set it. " +
+            "Restart the Twitch app for the change to take effect.",
+        Settings.KEY_ENABLED, def = true, done = true)
+
     private val ROOT = listOf(
+        MASTER,
         Sub("Third Party Services", items = THIRD_PARTY),
         Sub("Chat", items = CHAT),
         Sub("Player", items = PLAYER),
@@ -333,7 +340,17 @@ object PurpleMenu {
     )
 
     // ---------------------------------------------------------------- entry point
-    fun show(ctx: Context) = showScreen(ctx, "PurpleTV Settings", ROOT)
+
+    /**
+     * While the master switch is off, none of the features are wired, so showing their rows would
+     * offer settings that do nothing. The screen collapses to the switch itself -- which is also
+     * the only way back, since every other entry point into this menu belongs to a feature that is
+     * currently not running.
+     */
+    fun show(ctx: Context) = showScreen(
+        ctx, "PurpleTV Settings",
+        if (Settings.get(Settings.KEY_ENABLED, true)) ROOT else listOf(MASTER)
+    )
 
     private fun showScreen(ctx: Context, title: String, items: List<Item>) {
         val dlg = Dialog(ctx, android.R.style.Theme_Material_NoActionBar)
@@ -410,6 +427,13 @@ object PurpleMenu {
                 isEnabled = item.done
                 setOnCheckedChangeListener { _, v ->
                     Settings.set(item.key, v)
+                    if (item.key == Settings.KEY_ENABLED) {
+                        // Hooks are installed once, at startup, so this cannot take effect until
+                        // the app is started again. Say so rather than letting it look broken.
+                        toast(ctx, if (v) "PurpleTV on — restart the Twitch app"
+                                   else "PurpleTV off — restart the Twitch app")
+                        return@setOnCheckedChangeListener
+                    }
                     // Both take effect on the live chat behind the menu.
                     ViewHider.reapply()
                     ChatAppearance.reapply()
