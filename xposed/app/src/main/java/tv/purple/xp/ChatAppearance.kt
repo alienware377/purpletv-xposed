@@ -14,8 +14,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
  * Chat appearance: message font size and alternating row backgrounds.
  *
  * Anchored on resource entry names, like the rest of the module:
- *   chat_message      — the message TextView inside a row
- *   chat_message_item — the row root, where the alternating background goes
+ *   chat_message_item      — the message TextView of an ordinary chat line
+ *   chat_message           — the message TextView of the One Chat overlay and the user-notice rows
+ *   chat_message_container — the row ROOT, where the alternating background goes
+ *
+ * The first two were previously the wrong way round: `chat_message_item` was treated as the row
+ * root and `chat_message` as the message view. Both names are real, which is what let the mistake
+ * survive — but `chat_message` does not appear in the main chat list at all, so the font size
+ * silently never reached it, and the alternating tint was painted on the message TextView instead
+ * of the row, leaving the row's 6dp vertical padding untinted.
  *
  * Both settings are re-applied on every layout pass. Values are only written when they actually
  * differ from what the view already has: mutating a view during a layout pass schedules another
@@ -80,15 +87,45 @@ object ChatAppearance {
         // Row index drives the alternating shade. Counting matched rows in tree order is stable
         // enough here: children of the chat recycler are laid out in message order.
         var rowIndex = 0
+        var nItem = 0; var nMessage = 0; var nContainer = 0
         walk(root) { v ->
             when (runCatching { v.resources.getResourceEntryName(v.id) }.getOrNull()) {
-                "chat_message" -> if (v is TextView) applyFontSize(v, sizeSp)
-                "chat_message_item" -> {
-                    applyAltBackground(v, altBg, rowIndex)
-                    rowIndex++
+                // Ordinary chat lines carry chat_message_item; the One Chat overlay and the
+                // user-notice rows carry chat_message. Both are message TextViews, so both are
+                // sized -- matching only one of them is what left the slider inert.
+                "chat_message_item" -> { nItem++; if (v is TextView) applyFontSize(v, sizeSp) }
+                "chat_message" -> { nMessage++; if (v is TextView) applyFontSize(v, sizeSp) }
+                "chat_message_container" -> {
+                    nContainer++
+                    // Rows the blacklist has collapsed are not on screen, so counting them would
+                    // walk the alternation out of step with what is actually visible.
+                    if (v.visibility == View.VISIBLE) {
+                        applyAltBackground(v, altBg, rowIndex)
+                        rowIndex++
+                    }
                 }
             }
         }
+        reportMatches(nItem, nMessage, nContainer)
+    }
+
+    /** Last reported match counts, so a change is logged once instead of every layout pass.
+     *  Kept as ints rather than a string so the common case costs a comparison, not an allocation:
+     *  this runs on every pass, and chat lays out constantly. */
+    @Volatile private var lastItem = -1
+    @Volatile private var lastMessage = -1
+    @Volatile private var lastContainer = -1
+
+    /** Which of the three anchors the live tree actually carries. Reported on CHANGE, because the
+     *  counts differ per screen and a one-shot would describe whichever screen happened to be up
+     *  first. This is the check that showed the old mapping never matched the main chat list at
+     *  all: in a live chat it reads chat_message=0 while the other two are in double figures. */
+    private fun reportMatches(item: Int, message: Int, container: Int) {
+        if (item == 0 && message == 0 && container == 0) return
+        if (item == lastItem && message == lastMessage && container == lastContainer) return
+        lastItem = item; lastMessage = message; lastContainer = container
+        log("CA anchors: chat_message_item=$item chat_message=$message " +
+            "chat_message_container=$container")
     }
 
     private fun applyFontSize(tv: TextView, sizeSp: Float) {
