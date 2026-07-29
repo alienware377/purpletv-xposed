@@ -64,14 +64,15 @@ object ChatLineStyle {
         model ?: return
         val tsMode = Settings.getInt(KEY_TIMESTAMP, 0)
         val meMode = Settings.getInt(KEY_ME_STYLE, 0)
-        val delMode = Settings.getInt(KEY_DELETED, 0)
-        if (tsMode == 0 && meMode == ME_DISABLED && delMode == DEL_DEFAULT) return
+        // Deleted messages are deliberately not consulted here: they are handled at the TextView,
+        // so this hook has nothing to do for them.
+        if (tsMode == 0 && meMode == ME_DISABLED) return
 
         val msg = Fields.message(args) ?: return
         if (tsMode != 0) runCatching { applyTimestamp(model, msg, tsMode) }
             .onFailure { log("CLS timestamp: $it") }
-        if (meMode != ME_DISABLED || delMode != DEL_DEFAULT)
-            runCatching { applyBodyStyle(model, msg, meMode, delMode) }
+        if (meMode != ME_DISABLED)
+            runCatching { applyBodyStyle(model, msg, meMode) }
                 .onFailure { log("CLS body: $it") }
     }
 
@@ -98,75 +99,234 @@ object ChatLineStyle {
         XposedHelpers.setObjectField(model, Names.TIME_FIELD, out)
     }
 
-    /** Style the message body for `/me` actions and for deleted messages. */
-    private fun applyBodyStyle(model: Any, msg: Any, meMode: Int, delMode: Int) {
-        val isAction = meMode != ME_DISABLED && Fields.isAction(msg) == true
-        val isDeleted = delMode != DEL_DEFAULT && Fields.isDeleted(msg) == true
-        if (!isAction && !isDeleted) return
+    /**
+     * Style the message body for `/me` actions.
+     *
+     * Deleted messages are deliberately NOT handled here -- see [reviveDeleted]. The message's own
+     * isDeleted flag still reads false at this point, and the placeholder that replaces the body is
+     * built further down the render chain, so anything written here would be styling text that is
+     * about to be thrown away. That is exactly how this feature failed the first time.
+     */
+    private fun applyBodyStyle(model: Any, msg: Any, meMode: Int) {
+        if (meMode == ME_DISABLED || Fields.isAction(msg) != true) return
 
-        var body = XposedHelpers.getObjectField(model, Names.BODY_FIELD) as? CharSequence ?: return
+        val body = XposedHelpers.getObjectField(model, Names.BODY_FIELD) as? CharSequence ?: return
         if (body.isEmpty()) return
         if (body is Spanned && body.getSpans(0, body.length, Marker::class.java).isNotEmpty()) return
-
-        // For a deleted message the body Twitch hands us is only a placeholder ("message
-        // deleted"); the REAL rendered body -- with its native emote spans and colouring intact --
-        // is parked inside the ClickableSpan that powers Twitch's own tap-to-reveal. Recover it,
-        // otherwise every option below would just be styling the placeholder text.
-        if (isDeleted) recoverDeleted(body)?.let { body = it }
 
         val out = SpannableStringBuilder(body)
         val end = out.length
 
-        if (isAction) {
-            if (meMode == ME_ITALIC || meMode == ME_ITALIC_COLORED)
-                out.setSpan(StyleSpan(Typeface.ITALIC), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            if (meMode == ME_COLORED || meMode == ME_ITALIC_COLORED)
-                // Twitch tints an action line in the sender's own chat colour; reuse it when the
-                // sender has one set, and otherwise leave the default colour alone.
-                Fields.senderColor(msg)?.let {
-                    out.setSpan(ForegroundColorSpan(it), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-        }
-
-        if (isDeleted) when (delMode) {
-            DEL_STRIKE -> out.setSpan(StrikethroughSpan(), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            DEL_GREY -> out.setSpan(ForegroundColorSpan(GREY), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            DEL_MOD -> Unit   // recovered text, unstyled: what a moderator sees
-        }
+        if (meMode == ME_ITALIC || meMode == ME_ITALIC_COLORED)
+            out.setSpan(StyleSpan(Typeface.ITALIC), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (meMode == ME_COLORED || meMode == ME_ITALIC_COLORED)
+            // Twitch tints an action line in the sender's own chat colour; reuse it when the
+            // sender has one set, and otherwise leave the default colour alone.
+            Fields.senderColor(msg)?.let {
+                out.setSpan(ForegroundColorSpan(it), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
 
         out.setSpan(Marker, 0, out.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
         XposedHelpers.setObjectField(model, Names.BODY_FIELD, out)
     }
 
     /**
-     * Pull the original body out of the deleted-message placeholder.
+     * Put a deleted message's original text back, at the moment the line reaches its TextView.
      *
-     * Twitch's own tap-to-reveal keeps the pre-deletion rendered text on the ClickableSpan it
-     * lays over the placeholder. Located without naming anything obfuscated: ClickableSpan is a
-     * framework class, and on that span the original is the single declared field whose TYPE is
-     * android.text.SpannedString. Returns null -- leaving the placeholder untouched -- if the
-     * shape ever changes.
+     * Rendering is the last point where the answer is knowable, and the only one that catches all
+     * the ways a deleted line reaches the screen: deleted while on screen, already deleted when it
+     * arrived, and re-bound from scrollback.
+     *
+     * Recovery needs nothing obfuscated. When Twitch builds the placeholder it hands the original
+     * rendered text to the ClickableSpan that powers its own tap-to-reveal, then lays that span
+     * over exactly the placeholder's range. ClickableSpan is a framework class, and the original is
+     * the only declared field on it whose TYPE is android.text.SpannedString -- so the span is found
+     * by type, the text by type, and the span's own bounds say precisely what to replace. Nothing
+     * here depends on a name R8 can rewrite; if the shape ever changes, nothing matches and the
+     * placeholder is left exactly as Twitch rendered it.
+     *
+     * @return replacement text, or null to leave [cs] untouched.
      */
-    private fun recoverDeleted(body: CharSequence): CharSequence? = runCatching {
-        val spanned = body as? Spanned ?: return null
-        val spans = spanned.getSpans(0, spanned.length, android.text.style.ClickableSpan::class.java)
-        for (sp in spans) {
-            for (f in sp.javaClass.declaredFields) {
-                if (f.type != android.text.SpannedString::class.java) continue
-                f.isAccessible = true
-                val original = f.get(sp) as? CharSequence ?: continue
-                if (original.isEmpty()) continue
-                if (deletedLogged < 2) {
-                    deletedLogged++
-                    log("CLS recovered deleted body (${original.length} chars) from ${sp.javaClass.name}")
-                }
-                return original
+    fun reviveDeleted(ctx: android.content.Context, cs: CharSequence): CharSequence? {
+        val mode = delMode()
+        if (mode == DEL_DEFAULT) return null
+
+        // This runs on EVERY TextView write in the whole app, so it rejects in O(1) before doing
+        // anything that costs. Both renderers put the placeholder last, so a line that does not end
+        // in '>' (or the bidi isolate that wraps it in RTL) cannot be one. The rejection ORDER here
+        // is deliberate: mode, then length, then last char, then the string compare, then spans.
+        val n = cs.length
+        if (n < 3) return null
+        val last = cs[n - 1]
+        if (last != '>' && last != PDI) return null
+
+        val spanned = cs as? Spanned ?: return null
+        if (spanned.getSpans(0, spanned.length, Marker::class.java).isNotEmpty()) return null
+
+        val needle = needle(ctx) ?: return null
+        val cut = when {
+            n >= needle.length && endsAt(cs, n - needle.length, needle) -> n - needle.length
+            // RTL wraps the same placeholder in bidi isolates.
+            last == PDI && n >= needle.length + 2 && cs[n - needle.length - 2] == FSI &&
+                endsAt(cs, n - needle.length - 1, needle) -> n - needle.length - 2
+            else -> return null
+        }
+        if (cut <= 0) return null
+
+        val body = fromCarrier(spanned, cut) ?: fromRevealSpan(spanned, cut) ?: run {
+            if (!tripwire) {
+                tripwire = true
+                log("CLS saw a deleted line but recovered nothing — carrier did not survive")
             }
+            return null
+        }
+
+        val out = SpannableStringBuilder(cs)
+        out.replace(cut, n, body)
+        when (mode) {
+            DEL_STRIKE -> out.setSpan(StrikethroughSpan(), cut, cut + body.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            DEL_GREY -> out.setSpan(ForegroundColorSpan(GREY), cut, cut + body.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            DEL_MOD -> Unit   // recovered text, unstyled: what a moderator sees
+        }
+        out.setSpan(Marker, 0, out.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+        if (deletedLogged < 3) {
+            deletedLogged++
+            log("CLS revived a deleted message (${body.length} chars, mode $mode)")
+        }
+        return out
+    }
+
+    /**
+     * Our own carrier, and the reason this works for ordinary viewers.
+     *
+     * Twitch attaches its tap-to-reveal span only for moderators, so for everyone else the original
+     * text is genuinely gone by the time the line is rendered -- confirmed on device, where a
+     * deleted line arrived carrying nothing at all. But the renderer builds the placeholder by
+     * SLICING the assembled line up to the end of the username and appending to that slice, and a
+     * slice copies every span overlapping it. So a span parked on the username slot survives into
+     * the placeholder, still holding the body the renderer discarded. That is also why a deleted
+     * line still shows the sender's badges and name colour.
+     *
+     * The carrier must end EXACTLY where the placeholder begins, which is what makes the match
+     * exact rather than a guess.
+     */
+    private fun fromCarrier(spanned: Spanned, cut: Int): CharSequence? {
+        for (sp in spanned.getSpans(0, spanned.length, Original::class.java)) {
+            if (spanned.getSpanEnd(sp) == cut && sp.body.isNotEmpty()) return sp.body
+        }
+        return null
+    }
+
+    /** Twitch's own tap-to-reveal span, present for moderators. Falls back to this so a moderator
+     *  still gets the original if our carrier was ever dropped. */
+    private fun fromRevealSpan(spanned: Spanned, cut: Int): CharSequence? {
+        for (sp in spanned.getSpans(0, spanned.length, android.text.style.ClickableSpan::class.java)) {
+            val original = originalOf(sp) ?: continue
+            // This span carries the message body on one render path and the WHOLE assembled line,
+            // header and all, on the other. Told apart by asking the text: if what came back opens
+            // with this line's own header, it is a whole line, and the body is what follows.
+            val header = spanned.subSequence(0, cut).toString()
+            if (original.length >= header.length &&
+                original.subSequence(0, header.length).toString() == header) {
+                return original.subSequence(header.length, original.length)
+            }
+            return original
+        }
+        return null
+    }
+
+    @Volatile private var tripwire = false
+
+    /**
+     * Rides the chat line's USERNAME slot carrying that line's real message body.
+     *
+     * A fresh instance per line, deliberately: a SpannableStringBuilder copies a span object only
+     * when it is not already attached to the destination, so a shared singleton would land on the
+     * first line and silently skip every one after it.
+     */
+    private class Original(val body: CharSequence)
+
+    /**
+     * Park the body on the username slot, so it is still there if this line is later deleted.
+     *
+     * Must run LAST in the chat-line hook: [ChatIdentity] rewrites this slot wholesale for badges
+     * and pronouns and would drop a carrier planted earlier, and the body must already carry our
+     * injected emotes and highlight before it is captured.
+     *
+     * SPAN_INCLUSIVE_EXCLUSIVE is load-bearing rather than a style choice. An inclusive end is a
+     * POINT, so text appended at exactly that offset falls INSIDE the span -- and both the line
+     * assembler and the placeholder renderer append at exactly this offset. With an inclusive end
+     * the carrier would swallow them and its end would no longer mark where the placeholder begins.
+     */
+    fun plantOriginal(model: Any?) {
+        model ?: return
+        if (delMode() == DEL_DEFAULT) return
+        val body = XposedHelpers.getObjectField(model, Names.BODY_FIELD) as? CharSequence ?: return
+        if (body.isEmpty()) return
+        val name = XposedHelpers.getObjectField(model, Names.NAME_FIELD) as? CharSequence ?: return
+        if (name.isEmpty()) return
+        // Copied so the badge, pronoun and colour spans already on the slot survive.
+        val out = SpannableStringBuilder(name)
+        out.setSpan(Original(body), 0, out.length, Spanned.SPAN_INCLUSIVE_EXCLUSIVE)
+        XposedHelpers.setObjectField(model, Names.NAME_FIELD, out)
+    }
+
+    /** The bidi isolate the renderer wraps the placeholder in under an RTL layout direction. */
+    private const val FSI = '⁨'
+
+    /** "<message deleted>", read from the app's own resources so it follows the app's language.
+     *  Cached against the Resources it came from, so a locale or configuration change re-reads. */
+    @Volatile private var needleText: String? = null
+    @Volatile private var needleRes: android.content.res.Resources? = null
+
+    private fun needle(ctx: android.content.Context): String? {
+        val res = ctx.resources ?: return null
+        needleText?.let { if (needleRes === res) return it }
+        return runCatching {
+            val id = res.getIdentifier("chat_message_deleted", "string", ctx.packageName)
+            if (id == 0) return null
+            ("<" + res.getString(id) + ">").also { needleText = it; needleRes = res }
+        }.getOrNull()
+    }
+
+    private fun endsAt(cs: CharSequence, at: Int, s: String): Boolean {
+        if (at < 0 || at + s.length > cs.length) return false
+        for (i in s.indices) if (cs[at + i] != s[i]) return false
+        return true
+    }
+
+    private const val PDI = '⁩'
+
+    /** [KEY_DELETED], re-read only when the settings actually change. */
+    @Volatile private var delRev = -1
+    @Volatile private var delModeCache = DEL_DEFAULT
+
+    private fun delMode(): Int {
+        val r = Settings.rev
+        if (delRev != r) {
+            delModeCache = Settings.getInt(KEY_DELETED, DEL_DEFAULT)
+            // Don't latch the default that comes back before the module has a context, or the
+            // feature would stay off until the next settings write.
+            if (Settings.isReady()) delRev = r
+        }
+        return delModeCache
+    }
+
+    /** The pre-deletion text carried by a tap-to-reveal span, or null if this is not one. */
+    private fun originalOf(sp: Any): CharSequence? = runCatching {
+        for (f in sp.javaClass.declaredFields) {
+            if (f.type != android.text.SpannedString::class.java) continue
+            f.isAccessible = true
+            val original = f.get(sp) as? CharSequence ?: continue
+            if (original.isNotEmpty()) return@runCatching original
         }
         null
     }.getOrNull()
 
     @Volatile private var deletedLogged = 0
+
 
     /** Structural, one-time resolution of the message fields this file needs. */
     private object Fields {

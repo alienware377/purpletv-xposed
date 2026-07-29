@@ -49,6 +49,19 @@ object Settings {
         if (appCtx == null) appCtx = ctx.applicationContext ?: ctx
     }
 
+    /** True once a context is available, so a hot-path reader can tell a real value from the
+     *  default it gets before the module has finished starting up. */
+    fun isReady() = appCtx != null
+
+    /**
+     * Bumped whenever anything is written. Readers on hot paths cache their value and re-read only
+     * when this changes -- [get] and friends hit SharedPreferences every call, which is fine for a
+     * settings screen and much too expensive for a hook that runs on every TextView write in the
+     * app.
+     */
+    @Volatile var rev: Int = 0
+        private set
+
     fun get(key: String, def: Boolean = true): Boolean {
         val c = appCtx ?: return def
         return runCatching {
@@ -62,6 +75,7 @@ object Settings {
             c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putBoolean(key, value).apply()
         }
+        rev++
     }
 
     fun getInt(key: String, def: Int): Int {
@@ -77,6 +91,7 @@ object Settings {
             c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putInt(key, value).apply()
         }
+        rev++
     }
 
     fun getString(key: String, def: String = ""): String {
@@ -92,5 +107,6 @@ object Settings {
             c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putString(key, value).apply()
         }
+        rev++
     }
 }

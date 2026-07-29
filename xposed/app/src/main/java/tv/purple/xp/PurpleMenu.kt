@@ -202,16 +202,12 @@ object PurpleMenu {
             listOf("International Name (Username)", "International Name", "Username")),
         Drop("/me Style", "", ChatLineStyle.KEY_ME_STYLE,
             listOf("Disabled", "Colored", "Italic", "Italic + Colored"), done = true),
-        // Greyed out on purpose: this cannot work from the chat-line hook. For a LIVE deletion the
-        // message's own isDeleted flag is final and already false by the time the line is built —
-        // the deletion is recorded on a separate mutable UI model afterwards, and the
-        // "<message deleted>" placeholder is produced by a downstream renderer that discards the
-        // body entirely. Anything written into the line here is thrown away one step later.
-        // Making it work needs the original body cached at assembly time and swapped back in at
-        // the TextView level, which is a different mechanism than the rest of this screen uses.
+        // Unlike its neighbours this one is applied at the TextView rather than on the chat-line
+        // model: the placeholder does not exist yet when the line is assembled. See
+        // ChatLineStyle.reviveDeleted.
         Drop("Deleted messages", "Choose how deleted messages are handled in the chat",
             ChatLineStyle.KEY_DELETED,
-            listOf("Default", "Mod", "Strikethrough", "Grey")),
+            listOf("Default", "Mod", "Strikethrough", "Grey"), done = true),
         Drop("Pinned messages", "Choose the behavior of pinned messages in the chat",
             "pinned_message", listOf("Default", "Disabled", "30 sec.")),
         Slide("Chat font size", "Adjust the font size for chat messages",

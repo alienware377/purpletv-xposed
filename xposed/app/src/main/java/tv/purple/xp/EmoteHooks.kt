@@ -88,6 +88,10 @@ object EmoteHooks {
                     runCatching { ChatHighlight.apply(param.result, param.args) }
                         .onFailure { log("highlight error: $it") }
                 }
+                // LAST: the deleted-message carrier captures the finished body, and rides a slot
+                // that ChatIdentity rewrites wholesale, so anything earlier would be dropped.
+                runCatching { ChatLineStyle.plantOriginal(param.result) }
+                    .onFailure { log("carrier plant error: $it") }
             }
         })
         log("emote inject hook installed on ${Names.ASSEMBLER}.${Names.ASSEMBLER_METHOD} (field .${Names.BODY_FIELD})")
@@ -109,6 +113,16 @@ object EmoteHooks {
                 TextView::class.java, "setText",
                 CharSequence::class.java, TextView.BufferType::class.java,
                 object : XC_MethodHook() {
+                    // Deleted messages are restored BEFORE the call, by rewriting the argument.
+                    // Doing it afterwards would mean calling setText again from inside setText.
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val tv = param.thisObject as? TextView ?: return
+                        val cs = param.args[0] as? CharSequence ?: return
+                        runCatching { ChatLineStyle.reviveDeleted(tv.context, cs) }
+                            .onFailure { log("revive deleted error: $it") }
+                            .getOrNull()?.let { param.args[0] = it }
+                    }
+
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val tv = param.thisObject as? TextView ?: return
                         val cs = param.args[0] as? CharSequence ?: return
